@@ -161,7 +161,8 @@ impl Database {
                 cookie_user TEXT,
                 cookies TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                auth_session TEXT
             )
         ",
             [],
@@ -390,6 +391,14 @@ impl Database {
                 "ALTER TABLE accounts ADD COLUMN region TEXT DEFAULT 'US'",
                 [],
             );
+        }
+
+        // 加密后的 Apple 登录态（dsid / passwordToken / guid），用于重启后恢复会话。
+        let has_auth_session = table_info
+            .iter()
+            .any(|(_, name, _, _, _, _)| name == "auth_session");
+        if !has_auth_session {
+            let _ = conn.execute("ALTER TABLE accounts ADD COLUMN auth_session TEXT", []);
         }
 
         // 账号唯一性：按 email 收口，只保留最新一条，避免 token 变了后产生重复账号。
@@ -999,6 +1008,30 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// 保存加密后的 Apple 登录态（JSON 字符串），按 token 定位账号。
+    pub fn update_account_session(&self, token: &str, auth_session: &str) -> Result<()> {
+        let conn = self.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET auth_session = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?",
+            params![auth_session, token],
+        )?;
+        Ok(())
+    }
+
+    /// 返回所有带有已保存登录态的账号：(token, email, auth_session)。
+    pub fn get_account_sessions(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.connection.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token, email, auth_session FROM accounts
+             WHERE auth_session IS NOT NULL AND auth_session != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 
     pub fn delete_account(&self, token: &str) -> Result<()> {

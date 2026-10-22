@@ -338,6 +338,9 @@ async fn account_auto_refresh_loop(db_arc: Arc<Mutex<Database>>) {
                     if state == "success" {
                         let mut accounts = ACCOUNTS.write().await;
                         if accounts.contains_key(token) {
+                            if let Ok(db) = db_arc.lock() {
+                                persist_account_session(&db, token, &new_store);
+                            }
                             accounts.insert(token.clone(), new_store);
                             log::info!(
                                 "[account-auto-refresh] refreshed {} (token {}...)",
@@ -418,6 +421,104 @@ async fn account_auto_refresh_loop(db_arc: Arc<Mutex<Database>>) {
             }
         }
     }
+}
+
+/// 持久化到 accounts.auth_session 的 Apple 登录态（整体 AES-GCM 加密）。
+#[derive(Serialize, Deserialize)]
+struct PersistedAccountSession {
+    guid: String,
+    auth_info: ipa_webtool_services::AuthInfo,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncryptedAccountSession {
+    ct: String,
+    iv: String,
+    tag: String,
+}
+
+/// 将账号当前登录态加密写入 DB，保证服务重启后无需重新登录。
+fn persist_account_session(db: &Database, token: &str, store: &AccountStore) {
+    let Some(auth_info) = store.auth_info.clone() else {
+        return;
+    };
+    let result = (|| -> Result<(), String> {
+        let payload = serde_json::to_string(&PersistedAccountSession {
+            guid: store.store.guid.clone(),
+            auth_info,
+        })
+        .map_err(|e| e.to_string())?;
+        let enc_key = ipa_webtool_services::crypto::ensure_encryption_key(db)?;
+        let (ct, iv, tag) = ipa_webtool_services::crypto::encrypt(&payload, &enc_key)?;
+        let blob = serde_json::to_string(&EncryptedAccountSession { ct, iv, tag })
+            .map_err(|e| e.to_string())?;
+        db.update_account_session(token, &blob)
+            .map_err(|e| e.to_string())
+    })();
+    if let Err(e) = result {
+        log::error!(
+            "[account-session] persist failed for {}: {}",
+            store.account_email,
+            e
+        );
+    }
+}
+
+/// 启动时从 DB 恢复已登录的 Apple 账号到内存。
+async fn restore_account_sessions(db_arc: &Arc<Mutex<Database>>) {
+    let restored: Vec<(String, AccountStore)> = {
+        let db = match db_arc.lock() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        let rows = match db.get_account_sessions() {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::error!("[account-session] load failed: {}", e);
+                return;
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let enc_key = match ipa_webtool_services::crypto::ensure_encryption_key(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("[account-session] encryption key error: {}", e);
+                return;
+            }
+        };
+        rows.into_iter()
+            .filter_map(|(token, email, blob)| {
+                let session = serde_json::from_str::<EncryptedAccountSession>(&blob)
+                    .map_err(|e| e.to_string())
+                    .and_then(|enc| {
+                        ipa_webtool_services::crypto::decrypt(&enc.ct, &enc.iv, &enc.tag, &enc_key)
+                    })
+                    .and_then(|plain| {
+                        serde_json::from_str::<PersistedAccountSession>(&plain)
+                            .map_err(|e| e.to_string())
+                    });
+                match session {
+                    Ok(session) => Some((
+                        token,
+                        AccountStore::restore(&email, session.guid, session.auth_info),
+                    )),
+                    Err(e) => {
+                        log::warn!("[account-session] skip {}: {}", email, e);
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+
+    let count = restored.len();
+    let mut accounts = ACCOUNTS.write().await;
+    for (token, store) in restored {
+        accounts.insert(token, store);
+    }
+    log::info!("[account-session] restored {} Apple account(s)", count);
 }
 
 fn get_account_id_for_token(token: &str) -> String {
@@ -1815,6 +1916,70 @@ mod tests {
 
         assert!(!empty_dir.exists());
         assert!(non_empty_dir.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn account_session_survives_restart() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ipatool-account-session-{}", nonce));
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("test.db");
+        let token = format!("session-test-{}", nonce);
+        let email = format!("{}@example.com", nonce);
+
+        {
+            let db = Database::new(db_path.to_string_lossy().as_ref()).unwrap();
+            db.save_account(&ipa_webtool_services::Account {
+                id: None,
+                token: token.clone(),
+                email: email.clone(),
+                region: "US".to_string(),
+                guid: None,
+                cookie_user: None,
+                cookies: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .unwrap();
+            let store = AccountStore::restore(
+                &email,
+                "AABBCCDDEEFF".to_string(),
+                ipa_webtool_services::AuthInfo {
+                    ds_person_id: Some("12345".to_string()),
+                    password_token: Some("secret-token".to_string()),
+                    display_name: Some("Test".to_string()),
+                    email: Some(email.clone()),
+                    region: Some("US".to_string()),
+                },
+            );
+            persist_account_session(&db, &token, &store);
+
+            let raw = db.get_account_sessions().unwrap();
+            assert!(
+                !raw[0].2.contains("secret-token"),
+                "session must be encrypted"
+            );
+        }
+
+        // 模拟重启：重新打开 DB 并恢复
+        let db_arc = Arc::new(Mutex::new(
+            Database::new(db_path.to_string_lossy().as_ref()).unwrap(),
+        ));
+        restore_account_sessions(&db_arc).await;
+
+        let accounts = ACCOUNTS.read().await;
+        let restored = accounts.get(&token).expect("account should be restored");
+        assert_eq!(restored.account_email, email);
+        assert_eq!(restored.store.guid, "AABBCCDDEEFF");
+        let auth = restored.auth_info.as_ref().unwrap();
+        assert_eq!(auth.ds_person_id.as_deref(), Some("12345"));
+        assert_eq!(auth.password_token.as_deref(), Some("secret-token"));
+        drop(accounts);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -3590,10 +3755,6 @@ async fn apple_login(
 
                 let mut region_for_response = resolved_account_region(&result, None);
 
-                // 存储账号到内存
-                let mut accounts = ACCOUNTS.write().await;
-                accounts.insert(token.clone(), account_store);
-
                 // 持久化账号到 DB
                 if let Ok(db) = data.db.lock() {
                     let existing_region = db
@@ -3614,6 +3775,7 @@ async fn apple_login(
                         updated_at: None,
                     };
                     let _ = db.save_account(&db_account);
+                    persist_account_session(&db, &token, &account_store);
 
                     // 可选：加密保存凭证
                     if req.save_credentials.unwrap_or(false) {
@@ -3644,6 +3806,9 @@ async fn apple_login(
                         }
                     }
                 }
+
+                // 存储账号到内存
+                ACCOUNTS.write().await.insert(token.clone(), account_store);
 
                 log::info!("Apple login success: email={}, dsid={}", req.email, dsid);
 
@@ -3928,9 +4093,6 @@ async fn auto_login_all(data: web::Data<AppState>) -> impl Responder {
                         .unwrap_or("")
                         .to_string();
 
-                    let mut accounts = ACCOUNTS.write().await;
-                    accounts.insert(token.clone(), store);
-
                     let mut region_for_response = resolved_account_region(&result, None);
 
                     // 持久化
@@ -3953,7 +4115,10 @@ async fn auto_login_all(data: web::Data<AppState>) -> impl Responder {
                             updated_at: None,
                         };
                         let _ = db.save_account(&db_account);
+                        persist_account_session(&db, &token, &store);
                     }
+
+                    ACCOUNTS.write().await.insert(token.clone(), store);
 
                     success.push(serde_json::json!({
                         "email": cred.email,
@@ -4066,17 +4231,17 @@ async fn refresh_login(
             if state == "success" {
                 let mut region_for_response = resolved_account_region(&result, None);
 
-                // 更新内存中的账号
-                let mut accounts = ACCOUNTS.write().await;
-                accounts.insert(token.clone(), store);
-
                 if let Ok(db) = data.db.lock() {
                     let existing_region =
                         db.get_latest_account_region_by_email(&email).ok().flatten();
                     let region = resolved_account_region(&result, existing_region);
                     region_for_response = region.clone();
                     let _ = db.update_account_region(&token, &region);
+                    persist_account_session(&db, &token, &store);
                 }
+
+                // 更新内存中的账号
+                ACCOUNTS.write().await.insert(token.clone(), store);
 
                 HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
                     "ok": true,
@@ -7193,6 +7358,9 @@ async fn main() -> std::io::Result<()> {
     // 启动 Apple 账号自动刷新后台任务。
     // 返回 JoinHandle 以便在优雅关闭时显式中止，避免后台循环在 DB 句柄
     // 释放后仍尝试写入（已通过 Arc<Mutex> 保护，但及时中止可减少无谓日志）。
+    // 恢复重启前已登录的 Apple 账号，避免每次重启/升级后登录态丢失。
+    restore_account_sessions(&db_arc).await;
+
     let refresh_task = tokio::spawn(account_auto_refresh_loop(db_arc.clone()));
 
     let bind_address = "0.0.0.0:8080";

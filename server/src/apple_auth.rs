@@ -228,6 +228,12 @@ pub struct Store {
 
 impl Store {
     pub fn new() -> Self {
+        Self::with_guid(Self::generate_guid())
+    }
+
+    /// 使用指定 GUID 创建 Store。passwordToken 与登录时的 GUID 绑定，
+    /// 恢复会话时必须沿用原 GUID（容器重建后 MAC 地址可能变化）。
+    pub fn with_guid(guid: String) -> Self {
         // IMPORTANT: Apple auth flow can return 302 redirects that must be handled
         // by retrying POST to the redirect location. Disable automatic redirect following.
         let client = Client::builder()
@@ -236,8 +242,6 @@ impl Store {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-
-        let guid = Self::generate_guid();
 
         Store { client, guid }
     }
@@ -751,6 +755,16 @@ impl AccountStore {
             store: Store::new(),
             account_email: email.to_string(),
             auth_info: None,
+            last_authenticated_at: std::time::Instant::now(),
+        }
+    }
+
+    /// 从持久化的登录态恢复账号（服务重启后使用）。
+    pub fn restore(email: &str, guid: String, auth_info: AuthInfo) -> Self {
+        AccountStore {
+            store: Store::with_guid(guid),
+            account_email: email.to_string(),
+            auth_info: Some(auth_info),
             last_authenticated_at: std::time::Instant::now(),
         }
     }
