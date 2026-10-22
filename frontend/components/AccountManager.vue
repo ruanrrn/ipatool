@@ -13,7 +13,7 @@
         返回
       </button>
       <div class="ap-nav__title">
-        添加 Apple ID
+        {{ isRelogin ? '重新登录 Apple ID' : '添加 Apple ID' }}
       </div>
       <div class="ap-nav__spacer" />
     </div>
@@ -39,7 +39,7 @@
               v-model="newAccount.password"
               type="password"
               label="密码"
-              placeholder="••••••••"
+              :placeholder="hasSavedPassword ? '已保存，可留空' : '••••••••'"
               :disabled="logging"
               autocomplete="current-password"
             />
@@ -84,30 +84,19 @@
                   :icon="checkboxCheckIcon"
                 />
               </span>
-              <span class="mobile-checkbox__label text-[14px] text-txt dark:text-txt-dark">保存密码以便下次自动登录</span>
+              <span class="mobile-checkbox__label text-[14px] text-txt dark:text-txt-dark">保存密码，重新登录时只需输入验证码</span>
             </label>
 
             <MobileButton
-              :disabled="logging || autoLogging || !isFormValid"
+              :disabled="logging || !isFormValid"
               :loading="logging"
               type="primary"
               block
               class="!rounded-[12px]"
               @click="loginAccount"
             >
-              {{ logging ? '添加中...' : '添加账号' }}
+              {{ logging ? '登录中...' : (isRelogin ? '重新登录' : '添加账号') }}
             </MobileButton>
-
-            <div
-              v-if="autoLogging"
-              class="flex items-center justify-center gap-2 rounded-xl border border-bdr dark:border-bdr-dark bg-surface dark:bg-surface-dark-muted px-4 py-3 text-body text-txt-secondary dark:text-txt-dark-secondary"
-            >
-              <SvgIcon
-                class="h-4 w-4 animate-spin"
-                :icon="spinnerIcon"
-              />
-              <span>正在自动登录保存的账号...</span>
-            </div>
 
             <p class="ap-form__hint">
               App Store 区域将根据账号信息自动匹配
@@ -125,7 +114,6 @@
 import SvgIcon from './SvgIcon.vue'
 import arrowLeftIcon from '../assets/icons/arrow-left.svg?raw'
 import checkboxCheckIcon from '../assets/icons/checkbox-check.svg?raw'
-import spinnerIcon from '../assets/icons/spinner.svg?raw'
 import { ref, computed, onMounted } from 'vue'
 import { API_BASE } from '../config.js'
 
@@ -135,23 +123,36 @@ import { Toast } from './MobileToast.vue'
 import { useAccounts, dedupeAccounts } from '../composables/useAccounts.js'
 import { apiFetch } from '../utils/api.js'
 
+const props = defineProps({
+  // 重新登录时预填的邮箱
+  reloginEmail: {
+    type: String,
+    default: ''
+  }
+})
+
 const emit = defineEmits(['accounts-updated', 'close'])
 
-const { accounts, loadAccounts, loadSavedCredentials: useLoadSavedCredentials, persistAccounts, autoLoginAll: useAutoLoginAll } = useAccounts()
+const { accounts, loadAccounts, loadSavedCredentials: useLoadSavedCredentials, persistAccounts } = useAccounts()
 const savedCredentials = ref([])
+const isRelogin = computed(() => !!props.reloginEmail)
 const newAccount = ref({
-  email: '',
+  email: props.reloginEmail,
   password: '',
   code: '',
   memo: '',
 })
 const logging = ref(false)
-const autoLogging = ref(false)
 const savePassword = ref(true)
 const mfaRequired = ref(false)
 
+const hasSavedPassword = computed(() => {
+  const email = newAccount.value.email.trim().toLowerCase()
+  return !!email && savedCredentials.value.some((c) => c.email?.toLowerCase() === email)
+})
+
 const isFormValid = computed(() => {
-  return newAccount.value.email && newAccount.value.password
+  return newAccount.value.email && (newAccount.value.password || hasSavedPassword.value)
 })
 
 const loadSavedCredentials = async () => {
@@ -168,7 +169,7 @@ const saveAccounts = () => {
 }
 
 const loginAccount = async () => {
-  if (!newAccount.value.email || !newAccount.value.password) {
+  if (!isFormValid.value) {
     Toast.warning('请填写完整的账号信息')
     return
   }
@@ -176,8 +177,8 @@ const loginAccount = async () => {
   const existingAccount = accounts.value.find(
     (acc) => acc.email === newAccount.value.email,
   )
-  if (existingAccount) {
-    Toast.warning('该账号已登录，无需重复登录')
+  if (existingAccount && !isRelogin.value) {
+    Toast.warning('该账号已登录，如需更新登录态请在设置中点击重新登录')
     return
   }
 
@@ -234,13 +235,14 @@ const loginAccount = async () => {
 
     mfaRequired.value = false
     accounts.value = dedupeAccounts([
-      ...accounts.value,
+      ...accounts.value.filter((acc) => acc.email !== data.data.email),
       {
         token: data.data.token,
         email: data.data.email,
         dsid: data.data.dsid,
         region: data.data.region || 'US',
         hasSavedCredentials: !!savePassword.value,
+        loggedInAt: Math.floor(Date.now() / 1000),
       }
     ])
 
@@ -250,6 +252,7 @@ const loginAccount = async () => {
     newAccount.value = { email: '', password: '', code: '', memo: '' }
 
     Toast.success(`登录成功：${data.data.email}`)
+    if (isRelogin.value) emit('close')
   } catch (error) {
     Toast.error(`网络错误：${error.message}`)
   } finally {
@@ -257,49 +260,9 @@ const loginAccount = async () => {
   }
 }
 
-const autoLoginAll = async () => {
-  if (savedCredentials.value.length === 0) return
-
-  autoLogging.value = true
-
-  try {
-    const data = await useAutoLoginAll()
-
-    if (data && data.ok && data.results) {
-      const { success = [], needCode = [], failed = [] } = data.results
-
-      if (success.length > 0 || needCode.length > 0 || failed.length > 0) {
-        let message = ''
-        if (success.length > 0) {
-          message += `成功登录 ${success.length} 个账号`
-        }
-        if (needCode.length > 0) {
-          if (message) message += '，'
-          message += `${needCode.length} 个账号需要验证码`
-        }
-        if (failed.length > 0) {
-          if (message) message += '，'
-          message += `${failed.length} 个账号登录失败`
-        }
-        setTimeout(() => {
-          if (success.length > 0 && needCode.length === 0 && failed.length === 0) {
-          } else {
-            Toast.show(message)
-          }
-        }, 500)
-      }
-    }
-  } catch (error) {
-    console.error('Auto login failed:', error)
-  } finally {
-    autoLogging.value = false
-  }
-}
-
 onMounted(async () => {
   await loadSavedCredentials()
   await loadAccounts()
-  await autoLoginAll()
   emit('accounts-updated', accounts.value)
 })
 

@@ -52,14 +52,6 @@ struct AuthenticatedAdmin {
     pub session_token: String,
 }
 
-/// Apple 账号自动刷新：每 CHECK_INTERVAL_SECONDS 秒检查一次，
-/// 对已保存密码且距上次认证超过 REFRESH_AFTER_SECS 的账号自动刷新。
-const ACCOUNT_REFRESH_CHECK_INTERVAL_SECS: u64 = 300; // 5 分钟检查一次
-const ACCOUNT_REFRESH_AFTER_SECS: u64 = 1800; // 30 分钟后视为需要刷新
-const ACCOUNT_REFRESH_BACKOFF_BASE_SECS: u64 = 300; // 失败退避基数 5min
-const ACCOUNT_REFRESH_BACKOFF_CAP_SECS: u64 = 4800; // 退避上限 80min
-const ACCOUNT_REFRESH_RATE_LIMIT_BACKOFF_SECS: u64 = 1800; // 429 固定惩罚 30min
-
 /// Per-IP and per-username login rate limiter.
 /// After LOGIN_RATE_LIMIT_MAX_FAILURES failed attempts within LOGIN_RATE_LIMIT_WINDOW,
 /// further attempts are rejected until the window elapses.
@@ -204,220 +196,123 @@ fn github_contents_api_path(file_path: &str) -> String {
         .join("/")
 }
 
-/// 后台自动刷新 Apple 账号会话的循环任务。
-/// 每隔 ACCOUNT_REFRESH_CHECK_INTERVAL_SECS 扫描一次所有已登录账号，
-/// 对"已保存密码"且"距上次认证超过 ACCOUNT_REFRESH_AFTER_SECS"的账号
-/// 使用保存的密码重新认证，刷新 passwordToken。
-///
-/// 失败退避策略：
-/// - 每次认证失败后，该账号进入指数退避：min(5min * 2^failures, 80min)
-/// - 遇到 429 Rate Limit 时，固定退避 30min（不叠加指数）
-/// - 成功后重置失败计数
-/// - 启动后首次扫描跳过（避免启动风暴）
-async fn account_auto_refresh_loop(db_arc: Arc<Mutex<Database>>) {
-    // Per-email failure tracking: (consecutive_failures, backoff_deadline)
-    let mut failure_state: std::collections::HashMap<String, (u32, std::time::Instant)> =
-        std::collections::HashMap::new();
-    let mut first_loop = true;
+/// 持久化到 accounts.auth_session 的 Apple 登录态（整体 AES-GCM 加密）。
+#[derive(Serialize, Deserialize)]
+struct PersistedAccountSession {
+    guid: String,
+    auth_info: ipa_webtool_services::AuthInfo,
+    #[serde(default)]
+    authenticated_at: i64,
+}
 
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(
-            ACCOUNT_REFRESH_CHECK_INTERVAL_SECS,
-        ))
-        .await;
+#[derive(Serialize, Deserialize)]
+struct EncryptedAccountSession {
+    ct: String,
+    iv: String,
+    tag: String,
+}
 
-        // Stagger: skip the very first check to avoid post-restart auth storm
-        if first_loop {
-            first_loop = false;
-            log::info!("[account-auto-refresh] first cycle skipped (post-startup stagger)");
-            continue;
-        }
-
-        // 1. 收集需要刷新的账号：token → email
-        let accounts_to_refresh: Vec<(String, String)> = {
-            let accounts = ACCOUNTS.read().await;
-            accounts
-                .iter()
-                .filter(|(_, store)| {
-                    store.auth_info.is_some()
-                        && store.last_authenticated_at.elapsed().as_secs()
-                            >= ACCOUNT_REFRESH_AFTER_SECS
-                })
-                .map(|(token, store)| (token.clone(), store.account_email.clone()))
-                .collect()
-        };
-
-        if accounts_to_refresh.is_empty() {
-            continue;
-        }
-
-        log::info!(
-            "[account-auto-refresh] {} account(s) need refresh",
-            accounts_to_refresh.len()
+/// 将账号当前登录态加密写入 DB，保证服务重启后无需重新登录。
+fn persist_account_session(db: &Database, token: &str, store: &AccountStore) {
+    let Some(auth_info) = store.auth_info.clone() else {
+        return;
+    };
+    let result = (|| -> Result<(), String> {
+        let payload = serde_json::to_string(&PersistedAccountSession {
+            guid: store.store.guid.clone(),
+            auth_info,
+            authenticated_at: store.authenticated_at,
+        })
+        .map_err(|e| e.to_string())?;
+        let enc_key = ipa_webtool_services::crypto::ensure_encryption_key(db)?;
+        let (ct, iv, tag) = ipa_webtool_services::crypto::encrypt(&payload, &enc_key)?;
+        let blob = serde_json::to_string(&EncryptedAccountSession { ct, iv, tag })
+            .map_err(|e| e.to_string())?;
+        db.update_account_session(token, &blob)
+            .map_err(|e| e.to_string())
+    })();
+    if let Err(e) = result {
+        log::error!(
+            "[account-session] persist failed for {}: {}",
+            store.account_email,
+            e
         );
+    }
+}
 
-        // 2. 获取已保存凭证的邮箱集合
-        let saved_emails: std::collections::HashSet<String> = {
-            let db = match db_arc.lock() {
-                Ok(db) => db,
-                Err(_) => continue,
-            };
-            match db.get_all_credentials() {
-                Ok(creds) => creds.into_iter().map(|c| c.email).collect(),
-                Err(_) => continue,
+/// 启动时从 DB 恢复已登录的 Apple 账号到内存。
+async fn restore_account_sessions(db_arc: &Arc<Mutex<Database>>) {
+    let restored: Vec<(String, AccountStore)> = {
+        let db = match db_arc.lock() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        let rows = match db.get_account_sessions() {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::error!("[account-session] load failed: {}", e);
+                return;
             }
         };
-
-        // 3. 逐个刷新（带退避检查）
-        for (token, email) in &accounts_to_refresh {
-            if !saved_emails.contains(email.as_str()) {
-                log::debug!(
-                    "[account-auto-refresh] skip {} (no saved credentials)",
-                    email
-                );
-                continue;
-            }
-
-            // 检查退避截止时间
-            if let Some((failures, deadline)) = failure_state.get(email.as_str()) {
-                if std::time::Instant::now() < *deadline {
-                    let remaining = deadline.duration_since(std::time::Instant::now()).as_secs();
-                    log::debug!(
-                        "[account-auto-refresh] skip {} (backoff {}s remaining, failures={})",
-                        email,
-                        remaining,
-                        failures
-                    );
-                    continue;
-                }
-            }
-
-            // 解密密码
-            let password = {
-                let db = match db_arc.lock() {
-                    Ok(db) => db,
-                    Err(_) => continue,
-                };
-                let cred = match db.get_credentials(email) {
-                    Ok(Some(c)) => c,
-                    _ => continue,
-                };
-                let enc_key = match ipa_webtool_services::crypto::ensure_encryption_key(&db) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        log::error!(
-                            "[account-auto-refresh] encryption key error for {}: {}",
-                            email,
-                            e
-                        );
-                        continue;
-                    }
-                };
-                match ipa_webtool_services::crypto::decrypt(
-                    &cred.password_encrypted,
-                    &cred.iv,
-                    &cred.auth_tag,
-                    &enc_key,
-                ) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        log::error!("[account-auto-refresh] decrypt failed for {}", email);
-                        continue;
-                    }
-                }
-            };
-
-            // 重新认证
-            let mut new_store = AccountStore::new(email);
-            match new_store.authenticate(&password, None).await {
-                Ok(result) => {
-                    let state = result
-                        .get("_state")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("failure");
-                    if state == "success" {
-                        let mut accounts = ACCOUNTS.write().await;
-                        if accounts.contains_key(token) {
-                            accounts.insert(token.clone(), new_store);
-                            log::info!(
-                                "[account-auto-refresh] refreshed {} (token {}...)",
-                                email,
-                                &token[..8.min(token.len())]
-                            );
-                        }
-                        // 成功后重置退避
-                        failure_state.remove(email.as_str());
-                    } else {
-                        let failure_type = result
-                            .get("failureType")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let customer_msg = result
-                            .get("customerMessage")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown failure");
-
-                        // 判断是否为 429 rate limit
-                        let is_rate_limit = customer_msg.contains("Rate limit has been exceeded");
-
-                        let entry = failure_state
-                            .entry(email.clone())
-                            .or_insert((0, std::time::Instant::now()));
-                        entry.0 += 1;
-
-                        let backoff_secs = if is_rate_limit {
-                            // 429: fixed long backoff, don't compound
-                            log::warn!(
-                                "[account-auto-refresh] rate limited for {}: 429 — backing off {}min (was {} consecutive failures)",
-                                email,
-                                ACCOUNT_REFRESH_RATE_LIMIT_BACKOFF_SECS / 60,
-                                entry.0
-                            );
-                            ACCOUNT_REFRESH_RATE_LIMIT_BACKOFF_SECS
-                        } else {
-                            let base = ACCOUNT_REFRESH_BACKOFF_BASE_SECS;
-                            let cap = ACCOUNT_REFRESH_BACKOFF_CAP_SECS;
-                            let delay = std::cmp::min(
-                                base.saturating_mul(1u64 << (entry.0 - 1).min(6)),
-                                cap,
-                            );
-                            log::warn!(
-                                "[account-auto-refresh] auth failed for {}: {} (type={}) — backing off {}min (failure #{})",
-                                email,
-                                customer_msg,
-                                failure_type,
-                                delay / 60,
-                                entry.0
-                            );
-                            delay
-                        };
-
-                        entry.1 = std::time::Instant::now()
-                            + std::time::Duration::from_secs(backoff_secs);
-                    }
-                }
-                Err(e) => {
-                    let entry = failure_state
-                        .entry(email.clone())
-                        .or_insert((0, std::time::Instant::now()));
-                    entry.0 += 1;
-                    let delay = std::cmp::min(
-                        ACCOUNT_REFRESH_BACKOFF_BASE_SECS
-                            .saturating_mul(1u64 << (entry.0 - 1).min(6)),
-                        ACCOUNT_REFRESH_BACKOFF_CAP_SECS,
-                    );
-                    log::error!(
-                        "[account-auto-refresh] auth error for {}: {} — backing off {}min (failure #{})",
-                        email,
-                        e,
-                        delay / 60,
-                        entry.0
-                    );
-                    entry.1 = std::time::Instant::now() + std::time::Duration::from_secs(delay);
-                }
-            }
+        if rows.is_empty() {
+            return;
         }
+        let enc_key = match ipa_webtool_services::crypto::ensure_encryption_key(&db) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("[account-session] encryption key error: {}", e);
+                return;
+            }
+        };
+        rows.into_iter()
+            .filter_map(|(token, email, blob)| {
+                let session = serde_json::from_str::<EncryptedAccountSession>(&blob)
+                    .map_err(|e| e.to_string())
+                    .and_then(|enc| {
+                        ipa_webtool_services::crypto::decrypt(&enc.ct, &enc.iv, &enc.tag, &enc_key)
+                    })
+                    .and_then(|plain| {
+                        serde_json::from_str::<PersistedAccountSession>(&plain)
+                            .map_err(|e| e.to_string())
+                    });
+                match session {
+                    Ok(session) => Some((
+                        token,
+                        AccountStore::restore(
+                            &email,
+                            session.guid,
+                            session.auth_info,
+                            session.authenticated_at,
+                        ),
+                    )),
+                    Err(e) => {
+                        log::warn!("[account-session] skip {}: {}", email, e);
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+
+    let count = restored.len();
+    let mut accounts = ACCOUNTS.write().await;
+    for (token, store) in restored {
+        accounts.insert(token, store);
     }
+    log::info!("[account-session] restored {} Apple account(s)", count);
+}
+
+/// 解密已保存的 Apple ID 密码。
+fn load_saved_password(db: &Database, email: &str) -> Option<String> {
+    let cred = db.get_credentials(email).ok().flatten()?;
+    let enc_key = ipa_webtool_services::crypto::ensure_encryption_key(db).ok()?;
+    ipa_webtool_services::crypto::decrypt(
+        &cred.password_encrypted,
+        &cred.iv,
+        &cred.auth_tag,
+        &enc_key,
+    )
+    .ok()
 }
 
 fn get_account_id_for_token(token: &str) -> String {
@@ -1815,6 +1710,72 @@ mod tests {
 
         assert!(!empty_dir.exists());
         assert!(non_empty_dir.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn account_session_survives_restart() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ipatool-account-session-{}", nonce));
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("test.db");
+        let token = format!("session-test-{}", nonce);
+        let email = format!("{}@example.com", nonce);
+
+        {
+            let db = Database::new(db_path.to_string_lossy().as_ref()).unwrap();
+            db.save_account(&ipa_webtool_services::Account {
+                id: None,
+                token: token.clone(),
+                email: email.clone(),
+                region: "US".to_string(),
+                guid: None,
+                cookie_user: None,
+                cookies: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .unwrap();
+            let store = AccountStore::restore(
+                &email,
+                "AABBCCDDEEFF".to_string(),
+                ipa_webtool_services::AuthInfo {
+                    ds_person_id: Some("12345".to_string()),
+                    password_token: Some("secret-token".to_string()),
+                    display_name: Some("Test".to_string()),
+                    email: Some(email.clone()),
+                    region: Some("US".to_string()),
+                },
+                1_700_000_000,
+            );
+            persist_account_session(&db, &token, &store);
+
+            let raw = db.get_account_sessions().unwrap();
+            assert!(
+                !raw[0].2.contains("secret-token"),
+                "session must be encrypted"
+            );
+        }
+
+        // 模拟重启：重新打开 DB 并恢复
+        let db_arc = Arc::new(Mutex::new(
+            Database::new(db_path.to_string_lossy().as_ref()).unwrap(),
+        ));
+        restore_account_sessions(&db_arc).await;
+
+        let accounts = ACCOUNTS.read().await;
+        let restored = accounts.get(&token).expect("account should be restored");
+        assert_eq!(restored.account_email, email);
+        assert_eq!(restored.store.guid, "AABBCCDDEEFF");
+        assert_eq!(restored.authenticated_at, 1_700_000_000);
+        let auth = restored.auth_info.as_ref().unwrap();
+        assert_eq!(auth.ds_person_id.as_deref(), Some("12345"));
+        assert_eq!(auth.password_token.as_deref(), Some("secret-token"));
+        drop(accounts);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -3536,10 +3497,29 @@ async fn apple_login(
         mfa_code.as_ref().map(|s| s.len()).unwrap_or(0)
     );
 
+    // 密码留空时使用已保存的密码（重新登录只需输入验证码）
+    let password = if req.password.is_empty() {
+        match data
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| load_saved_password(&db, &req.email))
+        {
+            Some(password) => password,
+            None => {
+                return HttpResponse::Ok().json(ApiResponse::<String>::error(
+                    "该账号没有保存的密码，请输入密码".to_string(),
+                ))
+            }
+        }
+    } else {
+        req.password.clone()
+    };
+
     // 如果有 MFA code，优先复用第一轮暂存的 AccountStore（保留 GUID）
     // 否则创建新的
     let mut account_store = if has_mfa {
-        match take_pending_mfa(&req.email, &req.password).await {
+        match take_pending_mfa(&req.email, &password).await {
             Ok(store) => {
                 log::info!("Reusing pending MFA session for {}", req.email);
                 store
@@ -3561,7 +3541,7 @@ async fn apple_login(
     };
 
     match account_store
-        .authenticate(&req.password, mfa_code.as_deref())
+        .authenticate(&password, mfa_code.as_deref())
         .await
     {
         Ok(result) => {
@@ -3590,10 +3570,6 @@ async fn apple_login(
 
                 let mut region_for_response = resolved_account_region(&result, None);
 
-                // 存储账号到内存
-                let mut accounts = ACCOUNTS.write().await;
-                accounts.insert(token.clone(), account_store);
-
                 // 持久化账号到 DB
                 if let Ok(db) = data.db.lock() {
                     let existing_region = db
@@ -3614,6 +3590,7 @@ async fn apple_login(
                         updated_at: None,
                     };
                     let _ = db.save_account(&db_account);
+                    persist_account_session(&db, &token, &account_store);
 
                     // 可选：加密保存凭证
                     if req.save_credentials.unwrap_or(false) {
@@ -3621,7 +3598,7 @@ async fn apple_login(
                             ipa_webtool_services::crypto::ensure_encryption_key(&db)
                         {
                             if let Ok((ct, iv, tag)) =
-                                ipa_webtool_services::crypto::encrypt(&req.password, &enc_key)
+                                ipa_webtool_services::crypto::encrypt(&password, &enc_key)
                             {
                                 let key_id = db
                                     .get_current_encryption_key()
@@ -3643,6 +3620,13 @@ async fn apple_login(
                             }
                         }
                     }
+                }
+
+                // 存储账号到内存（同一邮箱重新登录时替换旧会话）
+                {
+                    let mut accounts = ACCOUNTS.write().await;
+                    accounts.retain(|_, store| store.account_email != req.email);
+                    accounts.insert(token.clone(), account_store);
                 }
 
                 log::info!("Apple login success: email={}, dsid={}", req.email, dsid);
@@ -3671,7 +3655,7 @@ async fn apple_login(
 
                 if needs_mfa && !has_mfa {
                     // 第一轮：暂存 AccountStore 保留 GUID，等用户提交验证码
-                    save_pending_mfa(&req.email, &req.password, account_store).await;
+                    save_pending_mfa(&req.email, &password, account_store).await;
 
                     log::info!("Saved pending MFA session for {}", req.email);
 
@@ -3684,7 +3668,7 @@ async fn apple_login(
                 // MFA code provided but still got MFA-related error — code may be wrong/expired
                 if needs_mfa && has_mfa {
                     // Re-save AccountStore for retry
-                    save_pending_mfa(&req.email, &req.password, account_store).await;
+                    save_pending_mfa(&req.email, &password, account_store).await;
 
                     log::warn!("MFA code rejected for {}", req.email);
 
@@ -3784,7 +3768,7 @@ async fn get_account_list(data: web::Data<AppState>) -> impl Responder {
             "region": region,
             "displayName": display_name,
             "hasSavedCredentials": has_saved_credentials,
-            "lastRefreshedAt": store.last_authenticated_at.elapsed().as_secs(),
+            "loggedInAt": store.authenticated_at,
         }));
     }
 
@@ -3839,261 +3823,6 @@ async fn get_credentials_list(data: web::Data<AppState>) -> impl Responder {
         }
         Err(e) => HttpResponse::InternalServerError()
             .json(ApiResponse::<String>::error(format!("获取凭证失败: {}", e))),
-    }
-}
-
-// 自动登录所有保存的凭证
-async fn auto_login_all(data: web::Data<AppState>) -> impl Responder {
-    let (credentials, enc_key) = {
-        let db = match data.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return HttpResponse::InternalServerError()
-                    .json(ApiResponse::<String>::error("数据库不可用".to_string()))
-            }
-        };
-
-        let credentials = match db.get_all_credentials() {
-            Ok(c) => c,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(ApiResponse::<String>::error(format!("获取凭证失败: {}", e)))
-            }
-        };
-
-        let enc_key = match ipa_webtool_services::crypto::ensure_encryption_key(&db) {
-            Ok(k) => k,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(ApiResponse::<String>::error(
-                    format!("加密密钥初始化失败: {}", e),
-                ))
-            }
-        };
-
-        (credentials, enc_key)
-    };
-
-    let mut success = Vec::new();
-    let mut need_code = Vec::new();
-    let mut failed = Vec::new();
-
-    let accounts = ACCOUNTS.read().await;
-    // 收集已登录的邮箱列表
-    let logged_in_emails: std::collections::HashSet<String> =
-        accounts.values().map(|a| a.account_email.clone()).collect();
-    drop(accounts);
-
-    for cred in &credentials {
-        // 解密密码
-        let db2 = match data.db.lock() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let password = match ipa_webtool_services::crypto::decrypt(
-            &cred.password_encrypted,
-            &cred.iv,
-            &cred.auth_tag,
-            &enc_key,
-        ) {
-            Ok(p) => p,
-            Err(_) => {
-                failed.push(serde_json::json!({ "email": cred.email, "error": "解密失败" }));
-                continue;
-            }
-        };
-        drop(db2);
-
-        // 检查是否已登录
-        if logged_in_emails.contains(&cred.email) {
-            success.push(serde_json::json!({
-                "email": cred.email,
-                "alreadyLoggedIn": true,
-            }));
-            continue;
-        }
-
-        // 尝试登录
-        let mut store = AccountStore::new(&cred.email);
-        match store.authenticate(&password, None).await {
-            Ok(result) => {
-                let state = result
-                    .get("_state")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("failure");
-                if state == "success" {
-                    let token = uuid::Uuid::new_v4().to_string();
-                    let dsid = result
-                        .get("dsPersonId")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let mut accounts = ACCOUNTS.write().await;
-                    accounts.insert(token.clone(), store);
-
-                    let mut region_for_response = resolved_account_region(&result, None);
-
-                    // 持久化
-                    if let Ok(db) = data.db.lock() {
-                        let existing_region = db
-                            .get_latest_account_region_by_email(&cred.email)
-                            .ok()
-                            .flatten();
-                        let region = resolved_account_region(&result, existing_region);
-                        region_for_response = region.clone();
-                        let db_account = ipa_webtool_services::Account {
-                            id: None,
-                            token: token.clone(),
-                            email: cred.email.clone(),
-                            region,
-                            guid: None,
-                            cookie_user: None,
-                            cookies: None,
-                            created_at: None,
-                            updated_at: None,
-                        };
-                        let _ = db.save_account(&db_account);
-                    }
-
-                    success.push(serde_json::json!({
-                        "email": cred.email,
-                        "token": token,
-                        "dsid": dsid,
-                        "region": region_for_response,
-                        "alreadyLoggedIn": false,
-                    }));
-                } else {
-                    let err_msg = result
-                        .get("customerMessage")
-                        .or(result.get("failureType"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("登录失败");
-
-                    if err_msg == "MZFinance.BadLogin.Configurator_message"
-                        || err_msg.contains("verification code")
-                        || err_msg.contains("two-factor")
-                        || err_msg.contains("MFA")
-                    {
-                        need_code.push(serde_json::json!({ "email": cred.email }));
-                    } else {
-                        failed.push(serde_json::json!({ "email": cred.email, "error": err_msg }));
-                    }
-                }
-            }
-            Err(e) => {
-                failed.push(serde_json::json!({ "email": cred.email, "error": e.to_string() }));
-            }
-        }
-    }
-
-    HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
-        "results": { "success": success, "needCode": need_code, "failed": failed }
-    })))
-}
-
-// 刷新账号会话（重新认证）
-async fn refresh_login(
-    req: web::Json<serde_json::Value>,
-    data: web::Data<AppState>,
-) -> impl Responder {
-    let token = match req.get("token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return HttpResponse::BadRequest()
-                .json(ApiResponse::<String>::error("缺少 token".to_string()))
-        }
-    };
-
-    // 查找现有账号
-    let accounts = ACCOUNTS.read().await;
-    let email = match accounts.get(&token) {
-        Some(store) => store.account_email.clone(),
-        None => {
-            return HttpResponse::NotFound()
-                .json(ApiResponse::<String>::error("账号不存在".to_string()))
-        }
-    };
-    drop(accounts);
-
-    let password = {
-        let db = match data.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return HttpResponse::InternalServerError()
-                    .json(ApiResponse::<String>::error("数据库不可用".to_string()))
-            }
-        };
-
-        let cred = match db.get_credentials(&email) {
-            Ok(Some(c)) => c,
-            _ => {
-                return HttpResponse::BadRequest().json(ApiResponse::<String>::error(
-                    "未找到保存的密码，无法自动刷新。请重新登录。".to_string(),
-                ))
-            }
-        };
-
-        let enc_key = match ipa_webtool_services::crypto::ensure_encryption_key(&db) {
-            Ok(k) => k,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(ApiResponse::<String>::error(format!("加密密钥失败: {}", e)))
-            }
-        };
-
-        match ipa_webtool_services::crypto::decrypt(
-            &cred.password_encrypted,
-            &cred.iv,
-            &cred.auth_tag,
-            &enc_key,
-        ) {
-            Ok(password) => password,
-            Err(_) => {
-                return HttpResponse::InternalServerError()
-                    .json(ApiResponse::<String>::error("解密密码失败".to_string()))
-            }
-        }
-    };
-
-    // 重新认证
-    let mut store = AccountStore::new(&email);
-    match store.authenticate(&password, None).await {
-        Ok(result) => {
-            let state = result
-                .get("_state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("failure");
-            if state == "success" {
-                let mut region_for_response = resolved_account_region(&result, None);
-
-                // 更新内存中的账号
-                let mut accounts = ACCOUNTS.write().await;
-                accounts.insert(token.clone(), store);
-
-                if let Ok(db) = data.db.lock() {
-                    let existing_region =
-                        db.get_latest_account_region_by_email(&email).ok().flatten();
-                    let region = resolved_account_region(&result, existing_region);
-                    region_for_response = region.clone();
-                    let _ = db.update_account_region(&token, &region);
-                }
-
-                HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
-                    "ok": true,
-                    "email": email,
-                    "region": region_for_response,
-                })))
-            } else {
-                let err_msg = result
-                    .get("customerMessage")
-                    .or(result.get("failureType"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("刷新失败");
-                HttpResponse::BadRequest().json(ApiResponse::<String>::error(err_msg.to_string()))
-            }
-        }
-        Err(e) => HttpResponse::InternalServerError()
-            .json(ApiResponse::<String>::error(format!("刷新失败: {}", e))),
     }
 }
 
@@ -7190,10 +6919,8 @@ async fn main() -> std::io::Result<()> {
         login_rate_limiter: Arc::new(Mutex::new(LoginRateLimiter::new())),
     });
 
-    // 启动 Apple 账号自动刷新后台任务。
-    // 返回 JoinHandle 以便在优雅关闭时显式中止，避免后台循环在 DB 句柄
-    // 释放后仍尝试写入（已通过 Arc<Mutex> 保护，但及时中止可减少无谓日志）。
-    let refresh_task = tokio::spawn(account_auto_refresh_loop(db_arc.clone()));
+    // 恢复重启前已登录的 Apple 账号，避免每次重启/升级后登录态丢失。
+    restore_account_sessions(&db_arc).await;
 
     let bind_address = "0.0.0.0:8080";
     log::info!("Starting server at {}", bind_address);
@@ -7236,8 +6963,6 @@ async fn main() -> std::io::Result<()> {
                              .route("/accounts", web::get().to(get_account_list))
                              .route("/accounts/{token}", web::delete().to(delete_account))
                              .route("/credentials", web::get().to(get_credentials_list))
-                             .route("/auto-login", web::post().to(auto_login_all))
-                             .route("/login/refresh", web::post().to(refresh_login))
                              .route("/versions", web::get().to(get_versions))
                              .route("/download-url", web::get().to(get_download_url))
                              .route("/purchase-status", web::get().to(get_purchase_status))
@@ -7302,12 +7027,7 @@ async fn main() -> std::io::Result<()> {
         SHUTDOWN_TIMEOUT_SECS
     );
 
-    let result = server.bind(bind_address)?.run().await;
-
-    // 优雅关闭收尾：中止后台自动刷新循环，避免进程退出时残留 tokio 任务告警。
-    refresh_task.abort();
-
-    result
+    server.bind(bind_address)?.run().await
 }
 
 /// 接收到停机信号后，等待进行中的请求（含 SSE / 文件下载）完成的最长时间。

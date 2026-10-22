@@ -1,6 +1,6 @@
 {
   "name": "ipa-tool",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "A modern IPA download and signing tool with app search capabilities",
   "type": "module",
   "scripts": {

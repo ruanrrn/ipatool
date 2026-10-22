@@ -31,7 +31,7 @@ const normaliseAccount = (acc) => ({
   dsid: acc.dsid,
   region: acc.region || 'US',
   hasSavedCredentials: !!acc.hasSavedCredentials,
-  lastRefreshedAt: acc.lastRefreshedAt ?? 0,
+  loggedInAt: acc.loggedInAt ?? null,
 })
 
 // --- Singleton state (shared across all consumers) ---
@@ -46,8 +46,8 @@ function persistAccounts() {
 }
 
 /**
- * Load accounts from server, with auto-login restore fallback.
- * Optionally triggers auto-login for saved credentials when server has none.
+ * Load accounts from server. Sessions are persisted server-side, so no
+ * auto-login is attempted (accounts with 2FA cannot log in without a code).
  */
 async function loadAccounts() {
   // Optimistic local load first
@@ -62,57 +62,12 @@ async function loadAccounts() {
     if (data.ok && data.data && data.data.length > 0) {
       accounts.value = dedupeAccounts(data.data.map(normaliseAccount))
       persistAccounts()
-    } else if (data.ok && (!data.data || data.data.length === 0)) {
-      // Server has no sessions — try auto-login restore
-      try {
-        const { data: autoData } = await apiFetch(`${API_BASE}/auto-login`, { credentials: 'include', method: 'POST' })
-        if (autoData.ok && autoData.data?.succeeded?.length > 0) {
-          const { data: retryData } = await apiFetch(`${API_BASE}/accounts`, { credentials: 'include' })
-          if (retryData.ok && retryData.data) {
-            accounts.value = dedupeAccounts(retryData.data.map(normaliseAccount))
-            persistAccounts()
-          }
-        }
-      } catch (e) {
-        console.warn('Auto-login restore failed:', e)
-      }
+    } else if (data.ok) {
+      accounts.value = []
+      persistAccounts()
     }
   } catch (error) {
     console.error('Failed to load accounts from server:', error)
-  }
-}
-
-/**
- * Auto-login all saved credentials (for AccountManager on mount).
- * Returns the raw result object from the server.
- */
-async function autoLoginAll() {
-  try {
-    const { data } = await apiFetch(`${API_BASE}/auto-login`, {
-      credentials: 'include',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    })
-    if (!data.ok || !data.results) return data
-
-    const { success = [] } = data.results
-
-    // Add newly logged-in accounts
-    for (const result of success) {
-      if (!result.alreadyLoggedIn) {
-        accounts.value.push(normaliseAccount({
-          ...result,
-          hasSavedCredentials: true,
-        }))
-      }
-    }
-
-    persistAccounts()
-    await loadAccounts()
-    return data
-  } catch (error) {
-    console.error('Auto login failed:', error)
-    return null
   }
 }
 
@@ -131,15 +86,12 @@ async function loadSavedCredentials() {
 
 /**
  * Composable: provides shared reactive accounts list and helpers.
- *
- * @param {object} [options]
- * @param {boolean} [options.autoLogin=false] — Run autoLoginAll after loadAccounts
+
  */
 export function useAccounts(_options = {}) {
   return {
     accounts,
     loadAccounts,
-    autoLoginAll,
     loadSavedCredentials,
     persistAccounts,
     accountIdentityKey,

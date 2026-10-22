@@ -47,6 +47,7 @@
         <AccountManager
           v-else-if="subPage === 'account'"
           key="account"
+          :relogin-email="reloginEmail"
           @close="subPage = null"
           @accounts-updated="(v) => emit('accounts-updated', v)"
         />
@@ -77,7 +78,7 @@
               @clear-all="emit('clear-queue')"
               @logout="emit('logout')"
               @navigate-to-appearance="subPage = 'appearance'"
-              @navigate-to-account="subPage = 'account'"
+              @navigate-to-account="openAccountPage"
               @navigate-to-changepassword="subPage = 'changepassword'"
             />
           </KeepAlive>
@@ -138,6 +139,13 @@ const appStore = useAppStore()
 const emit = defineEmits(['app-selected', 'download-started', 'accounts-updated', 'remove-item', 'clear-queue', 'logout'])
 const isMobile = ref(false)
 const subPage = ref(null) // null | 'appearance' | 'account' | 'changepassword'
+const reloginEmail = ref('')
+
+// email 有值时进入"重新登录"模式
+function openAccountPage(email) {
+  reloginEmail.value = typeof email === 'string' ? email : ''
+  subPage.value = 'account'
+}
 
 const checkMobile = () => {
  isMobile.value = window.innerWidth < 768
