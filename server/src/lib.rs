@@ -7,6 +7,7 @@ pub mod ipa_utils;
 pub mod key_manager;
 pub mod models;
 pub mod ota_install;
+pub mod sap;
 pub mod signature;
 pub mod web_jobs;
 pub mod webdav;

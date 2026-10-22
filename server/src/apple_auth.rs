@@ -1,8 +1,98 @@
+use crate::sap::{self, SapSigner};
+use base64::Engine as _;
 use reqwest::{header, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
+
+// Match ipatool reference: Configurator/2.17 + macOS 15.2
+const USER_AGENT: &str =
+    "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
+const DEFAULT_AUTH_ENDPOINT: &str = "https://auth.itunes.apple.com/auth/v1/native/fast/";
+const NATIVE_AUTH_HOST: &str = "auth.itunes.apple.com";
+const AUTH_REQUEST_ATTEMPTS: usize = 3;
+const AUTH_RETRY_DELAY: Duration = Duration::from_secs(10);
+const MAX_AUTH_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Apple only answers the auth endpoints with a trailing slash: the bare legacy path
+/// returns an empty or HTML response, the bare native path a 301 without Location.
+fn normalize_auth_url(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    let host = url.host_str().unwrap_or("").to_string();
+    if is_buy_host(&host)
+        && url
+            .path()
+            .trim_end_matches('/')
+            .eq("/WebObjects/MZFinance.woa/wa/authenticate")
+    {
+        url.set_path("/WebObjects/MZFinance.woa/wa/authenticate/");
+        return url.to_string();
+    }
+    if host != NATIVE_AUTH_HOST {
+        return raw.to_string();
+    }
+    let mut path = url.path().trim_end_matches('/').to_string();
+    if !path.ends_with("/fast") {
+        path.push_str("/fast");
+    }
+    url.set_path(&format!("{}/", path));
+    url.to_string()
+}
+
+fn is_buy_host(host: &str) -> bool {
+    host == "buy.itunes.apple.com"
+        || host
+            .strip_suffix("-buy.itunes.apple.com")
+            .and_then(|pod| pod.strip_prefix('p'))
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Only send credentials to Apple's HTTPS auth hosts.
+fn approved_auth_endpoint(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    let host = url.host_str()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !(host == NATIVE_AUTH_HOST || is_buy_host(host))
+    {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+fn is_transient_auth_status(status: u16) -> bool {
+    matches!(status, 204 | 404 | 429) || status / 100 == 5
+}
+
+fn retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = date.signed_duration_since(chrono::Utc::now());
+    Some(wait.to_std().unwrap_or(Duration::ZERO))
+}
+
+fn auth_failure(failure_type: &str, message: &str) -> HashMap<String, Value> {
+    let mut m = HashMap::new();
+    m.insert("_state".to_string(), Value::String("failure".to_string()));
+    m.insert(
+        "failureType".to_string(),
+        Value::String(failure_type.to_string()),
+    );
+    m.insert(
+        "customerMessage".to_string(),
+        Value::String(message.to_string()),
+    );
+    m
+}
 
 fn storefront_region(code: &str) -> Option<&'static str> {
     match code {
@@ -224,6 +314,8 @@ pub struct AuthInfo {
 pub struct Store {
     pub client: Client,
     pub guid: String,
+    /// SAP 签名会话：每次新登录重新建立，验证码步骤沿用同一个。
+    signer: Arc<tokio::sync::Mutex<Option<SapSigner>>>,
 }
 
 impl Store {
@@ -243,7 +335,11 @@ impl Store {
             .build()
             .unwrap();
 
-        Store { client, guid }
+        Store {
+            client,
+            guid,
+            signer: Arc::new(tokio::sync::Mutex::new(None)),
+        }
     }
 
     fn generate_guid() -> String {
@@ -280,22 +376,7 @@ impl Store {
 
     fn base_headers() -> header::HeaderMap {
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            "User-Agent",
-            // Match ipatool reference: Configurator/2.17 + macOS 15.2
-            "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6"
-                .parse()
-                .unwrap(),
-        );
-        headers
-    }
-
-    fn form_headers() -> header::HeaderMap {
-        let mut headers = Self::base_headers();
-        headers.insert(
-            "Content-Type",
-            "application/x-www-form-urlencoded".parse().unwrap(),
-        );
+        headers.insert("User-Agent", USER_AGENT.parse().unwrap());
         headers
     }
 
@@ -320,18 +401,6 @@ impl Store {
         } else {
             format!("{}?guid={}", endpoint, guid)
         }
-    }
-
-    fn resolve_redirect_url(current_url: &str, location: &str, guid: &str) -> Option<String> {
-        let candidate = match reqwest::Url::parse(location) {
-            Ok(url) => url,
-            Err(_) => {
-                let base = reqwest::Url::parse(current_url).ok()?;
-                base.join(location).ok()?
-            }
-        };
-
-        Some(Self::ensure_guid_query(candidate.as_str(), guid))
     }
 
     async fn resolve_auth_endpoint(&self) -> Result<String, String> {
@@ -361,14 +430,104 @@ impl Store {
 
         let parsed = parse_apple_plist_response(&body_text)?;
 
+        // Newer bags put authenticateAccount at the root; older ones inside urlBag.
         let endpoint = parsed
-            .get("urlBag")
-            .and_then(|v| v.as_object())
-            .and_then(|obj| obj.get("authenticateAccount"))
+            .get("authenticateAccount")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "bag missing urlBag.authenticateAccount".to_string())?;
+            .or_else(|| {
+                parsed
+                    .get("urlBag")
+                    .and_then(|v| v.as_object())
+                    .and_then(|obj| obj.get("authenticateAccount"))
+                    .and_then(|v| v.as_str())
+            })
+            .ok_or_else(|| "bag missing authenticateAccount".to_string())?;
 
         Ok(endpoint.to_string())
+    }
+
+    /// 发送一次带 SAP 签名的登录请求；Apple 返回临时状态（204/404/429/5xx）时
+    /// 按 10s、20s 退避重试，最多 3 次，并遵守不超过 30s 的 Retry-After。
+    /// 每次重发都对请求体重新签名。
+    async fn send_signed(
+        &self,
+        url: &str,
+        body: &[u8],
+        signer: &mut SapSigner,
+    ) -> Result<reqwest::Response, String> {
+        let mut statuses: Vec<u16> = Vec::new();
+        loop {
+            let signature = signer
+                .sign(body)
+                .map_err(|e| format!("Apple 登录签名失败：{}", e))?;
+            let response = self
+                .client
+                .post(url)
+                .headers(Self::base_headers())
+                .header("Content-Type", "application/x-apple-plist")
+                .header(
+                    "X-Apple-ActionSignature",
+                    base64::engine::general_purpose::STANDARD.encode(signature),
+                )
+                .body(body.to_vec())
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        "连接 Apple 超时，请检查网络环境".to_string()
+                    } else {
+                        format!("连接 Apple 失败：{}", e)
+                    }
+                })?;
+
+            let status = response.status().as_u16();
+            if !is_transient_auth_status(status) {
+                return Ok(response);
+            }
+
+            statuses.push(status);
+            if statuses.len() == AUTH_REQUEST_ATTEMPTS {
+                if status == 429 {
+                    return Err("Apple 频率限制 (429)，请等待 15-30 分钟后再试".to_string());
+                }
+                let list = statuses
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "Apple 暂时无法处理登录请求（已尝试 {} 次：HTTP {}），请稍后再试",
+                    AUTH_REQUEST_ATTEMPTS, list
+                ));
+            }
+
+            let mut delay = std::cmp::min(
+                AUTH_RETRY_DELAY * 2u32.pow(statuses.len() as u32 - 1),
+                MAX_AUTH_RETRY_DELAY,
+            );
+            if let Some(requested) = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after)
+            {
+                if requested > MAX_AUTH_RETRY_DELAY {
+                    return Err(format!(
+                        "Apple 要求 {} 秒后再试，请稍后重新登录",
+                        requested.as_secs()
+                    ));
+                }
+                delay = std::cmp::max(requested, Duration::from_secs(1));
+            }
+            log::warn!(
+                "Apple auth transient HTTP {} (attempt {}/{}), retrying in {}s",
+                status,
+                statuses.len(),
+                AUTH_REQUEST_ATTEMPTS,
+                delay.as_secs()
+            );
+            tokio::time::sleep(delay).await;
+        }
     }
 
     pub async fn authenticate(
@@ -377,190 +536,205 @@ impl Store {
         password: &str,
         mfa: Option<&str>,
     ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
-        // Prefer bag.xml-derived auth endpoint (more stable across regions/redirects).
-        let fallback = format!(
-            "https://auth.itunes.apple.com/auth/v1/native/fast?guid={}",
-            self.guid
-        );
-
         let endpoint = match self.resolve_auth_endpoint().await {
-            Ok(ep) => ep,
+            Ok(ep) => normalize_auth_url(&ep),
             Err(e) => {
                 log::warn!(
                     "Apple bag endpoint resolve failed (guid={}): {}. Falling back to {}",
                     self.guid,
                     e,
-                    fallback
+                    DEFAULT_AUTH_ENDPOINT
                 );
-                fallback
+                DEFAULT_AUTH_ENDPOINT.to_string()
+            }
+        };
+        let mut url = match approved_auth_endpoint(&endpoint) {
+            Some(url) => Self::ensure_guid_query(&url, &self.guid),
+            None => {
+                log::warn!("Unapproved auth endpoint {}, using default", endpoint);
+                Self::ensure_guid_query(DEFAULT_AUTH_ENDPOINT, &self.guid)
             }
         };
 
-        let mut url = Self::ensure_guid_query(&endpoint, &self.guid);
-        let mut last_result: Option<HashMap<String, Value>> = None;
+        // Apple 要求登录请求带 SAP 签名。签名会话在整个登录过程中复用，
+        // 包括第二步提交验证码（PENDING_MFA 中暂存的 Store 共享同一个 signer）。
+        let mut signer_guard = self.signer.lock().await;
+        if signer_guard.is_none() {
+            match sap::connect(&self.client, USER_AGENT).await {
+                Ok(signer) => *signer_guard = Some(signer),
+                Err(e) => {
+                    log::error!("SAP setup failed: {}", e);
+                    return Ok(auth_failure(
+                        "SapSetupError",
+                        &format!("Apple 登录签名初始化失败：{}", e),
+                    ));
+                }
+            }
+        }
+        let signer = signer_guard.as_mut().expect("signer initialized above");
+
+        let code = mfa
+            .map(|code| code.replace(' ', ""))
+            .filter(|code| !code.is_empty());
+        let auth_body = build_xml_plist_body(&[
+            ("appleId", email.to_string()),
+            (
+                "attempt",
+                if code.is_some() { "2" } else { "4" }.to_string(),
+            ),
+            ("guid", self.guid.clone()),
+            (
+                "password",
+                format!("{}{}", password, code.as_deref().unwrap_or("")),
+            ),
+            ("rmp", "0".to_string()),
+            ("why", "signIn".to_string()),
+        ])
+        .map_err(|e| format!("build auth plist failed: {}", e))?;
 
         // Best-effort region inference: some Apple flows only expose storefront headers
-        // on intermediate 302 responses. Keep the last seen value across redirects.
+        // on intermediate redirect responses. Keep the last seen value across redirects.
         let mut inferred_region: Option<String> = None;
+        let mut last_failure: Option<HashMap<String, Value>> = None;
+        let mut result: Option<HashMap<String, Value>> = None;
+        let mut attempt = 0;
+        let mut redirects = 0;
 
-        for attempt in 1..=4u32 {
-            // Exponential backoff between retries: 1s, 2s, 4s
-            if attempt > 1 {
-                let delay_secs = 1u64 << (attempt - 2); // 1, 2, 4
-                log::debug!(
-                    "Apple auth retry backoff: {}s before attempt {}",
-                    delay_secs,
-                    attempt
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            }
-
-            let combined_password = format!("{}{}", password, mfa.unwrap_or("").replace(' ', ""));
-
-            let auth_body = build_xml_plist_body(&[
-                ("appleId", email.to_string()),
-                ("attempt", attempt.to_string()),
-                ("createSession", "true".to_string()),
-                ("guid", self.guid.clone()),
-                ("password", combined_password),
-                ("rmp", "0".to_string()),
-                ("why", "signIn".to_string()),
-            ])
-            .map_err(|e| format!("build auth plist failed: {}", e))?;
-
+        while attempt < 2 && redirects <= 3 {
+            attempt += 1;
             log::info!(
-                "Apple auth attempt {}/4: url={}, has_mfa={}, guid={}",
+                "Apple auth attempt {}: url={}, has_mfa={}, guid={}",
                 attempt,
                 url,
-                mfa.is_some(),
+                code.is_some(),
                 self.guid
             );
 
-            let response = self
-                .client
-                .post(&url)
-                .headers(Self::form_headers())
-                .body(auth_body)
-                .send()
-                .await?;
+            let response = match self.send_signed(&url, &auth_body, signer).await {
+                Ok(response) => response,
+                Err(message) => {
+                    log::warn!("Apple auth request failed: {}", message);
+                    last_failure = Some(auth_failure("RequestError", &message));
+                    if message.contains("429") || message.contains("要求") {
+                        break;
+                    }
+                    continue;
+                }
+            };
 
             let status = response.status();
-            let response_region = extract_region_from_headers(response.headers());
-            if let Some(region) = response_region.clone() {
+            if let Some(region) = extract_region_from_headers(response.headers()) {
                 inferred_region = Some(region);
             }
 
-            // Handle 302 redirect — follow to new URL and retry
-            if status == StatusCode::FOUND || status == StatusCode::MOVED_PERMANENTLY {
-                if let Some(location) = response.headers().get("location") {
-                    if let Ok(loc_str) = location.to_str() {
-                        if let Some(redirect_url) =
-                            Self::resolve_redirect_url(&url, loc_str, &self.guid)
-                        {
-                            url = redirect_url;
-                            log::info!("Apple auth redirect -> {}", url);
-                            continue;
-                        }
+            // The native /fast host answers with 301 as well as 302; follow every redirect status.
+            if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+                let redirect = response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|location| reqwest::Url::parse(&url).ok()?.join(location).ok())
+                    .and_then(|target| {
+                        approved_auth_endpoint(&normalize_auth_url(target.as_str()))
+                    });
+                match redirect {
+                    Some(target) => {
+                        url = Self::ensure_guid_query(&target, &self.guid);
+                        log::info!("Apple auth redirect ({}) -> {}", status, url);
+                        attempt -= 1;
+                        redirects += 1;
+                    }
+                    None => {
+                        log::warn!("Apple auth redirect ({}) without usable Location", status);
+                        last_failure = Some(auth_failure(
+                            "RedirectError",
+                            "Apple 登录重定向异常，请稍后重试",
+                        ));
                     }
                 }
-
-                let mut redirect_failure = HashMap::new();
-                redirect_failure.insert("_state".to_string(), Value::String("failure".to_string()));
-                redirect_failure.insert(
-                    "failureType".to_string(),
-                    Value::String("RedirectError".to_string()),
-                );
-                redirect_failure.insert(
-                    "customerMessage".to_string(),
-                    Value::String("Apple 登录重定向异常，请重新开始登录流程".to_string()),
-                );
-                return Ok(redirect_failure);
+                continue;
             }
 
             let body_text = response.text().await.unwrap_or_default();
-
             log::info!(
                 "Apple auth response: status={}, body_len={}",
                 status,
                 body_text.len()
             );
 
-            // Detect non-plist error responses before parsing
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                log::warn!(
-                    "Apple auth rate limited (attempt {}/4): {}",
-                    attempt,
-                    body_text.trim()
-                );
-                let mut m = HashMap::new();
-                m.insert("_state".to_string(), Value::String("failure".to_string()));
-                m.insert(
-                    "failureType".to_string(),
-                    Value::String("RateLimited".to_string()),
-                );
-                m.insert(
-                    "customerMessage".to_string(),
-                    Value::String("Apple 频率限制 (429)，请等待 15-30 分钟后再试".to_string()),
-                );
-                // Don't retry on 429 — each retry burns more quota
-                return Ok(m);
-            }
-
-            // Parse plist response
-            let mut result = match parse_apple_plist_response(&body_text) {
-                Ok(m) => m,
-                Err(e) => {
-                    log::error!(
-                        "Failed to parse Apple response ({} bytes, attempt {}): {}",
-                        body_text.len(),
-                        attempt,
-                        e
-                    );
-                    let mut m = HashMap::new();
-                    m.insert("_state".to_string(), Value::String("failure".to_string()));
-                    m.insert(
-                        "failureType".to_string(),
-                        Value::String("ParseError".to_string()),
-                    );
-                    let hint = if body_text.contains("Rate limit") {
-                        "Apple 频率限制 (429)，请等待 15-30 分钟后再试"
-                    } else if body_text.len() < 200 {
-                        &body_text
-                    } else {
-                        "无法解析 Apple 的响应，请稍后重试"
-                    };
-                    m.insert(
-                        "customerMessage".to_string(),
-                        Value::String(hint.to_string()),
-                    );
-                    return Ok(m);
-                }
-            };
-
-            if let Some(region) = inferred_region.clone().or(response_region.clone()) {
-                log::info!("Apple auth inferred region from headers: {}", region);
-                result.insert("region".to_string(), Value::String(region));
-            }
-
-            let failure_type = result
-                .get("failureType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            // Match ipatool reference behavior:
-            // attempt 1 may return InvalidCredentials (-5000) even for correct passwords.
-            // auto-retry once (or until attempt limit).
-            if attempt == 1 && failure_type == "-5000" {
-                log::info!("Apple auth: InvalidCredentials on attempt 1, auto-retrying");
-                last_result = Some(result);
+            if status != StatusCode::OK || body_text.trim().is_empty() {
+                last_failure = Some(auth_failure(
+                    "UnexpectedResponse",
+                    &format!(
+                        "Apple 未返回有效的登录结果（HTTP {}），请稍后重试",
+                        status.as_u16()
+                    ),
+                ));
                 continue;
             }
 
-            last_result = Some(result);
-            break;
+            match parse_apple_plist_response(&body_text) {
+                Ok(parsed) => {
+                    let failure_type = parsed
+                        .get("failureType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    // Apple may answer the first sign-in with InvalidCredentials (-5000)
+                    // even for correct passwords; retry once.
+                    if attempt == 1 && failure_type == "-5000" {
+                        log::info!("Apple auth: InvalidCredentials on attempt 1, retrying");
+                        last_failure = Some(parsed);
+                        continue;
+                    }
+                    result = Some(parsed);
+                    break;
+                }
+                Err(e) => {
+                    log::error!("Failed to parse Apple response: {}", e);
+                    last_failure = Some(auth_failure(
+                        "ParseError",
+                        "无法解析 Apple 的响应，请稍后重试",
+                    ));
+                }
+            }
         }
 
-        let result = last_result.unwrap_or_default();
+        let Some(mut result) = result else {
+            let failure = last_failure.unwrap_or_else(|| {
+                auth_failure("UnknownError", "登录失败，Apple 未返回具体错误信息")
+            });
+            log::warn!(
+                "Apple auth failure: type='{}', msg='{}'",
+                failure
+                    .get("failureType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                failure
+                    .get("customerMessage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            );
+            let mut failure = failure;
+            failure.insert("_state".to_string(), Value::String("failure".to_string()));
+            return Ok(failure);
+        };
+
+        if let Some(region) = inferred_region.clone() {
+            log::info!("Apple auth inferred region from headers: {}", region);
+            result.insert("region".to_string(), Value::String(region));
+        }
+        // Some failures only carry the text in dialog.explanation.
+        if !result.contains_key("customerMessage") {
+            if let Some(explanation) = result
+                .get("dialog")
+                .and_then(|v| v.as_object())
+                .and_then(|dialog| dialog.get("explanation"))
+                .cloned()
+            {
+                result.insert("customerMessage".to_string(), explanation);
+            }
+        }
+
         let mut final_result = result.clone();
 
         // Check for success
@@ -827,5 +1001,58 @@ impl AccountStore {
         self.store
             .ensure_license(app_identifier, app_ver_id, auth_info)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_auth_urls_with_trailing_slash() {
+        assert_eq!(
+            normalize_auth_url(
+                "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate"
+            ),
+            "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate/"
+        );
+        assert_eq!(
+            normalize_auth_url(
+                "https://p71-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate?guid=AB"
+            ),
+            "https://p71-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate/?guid=AB"
+        );
+        assert_eq!(
+            normalize_auth_url("https://auth.itunes.apple.com/auth/v1/native"),
+            "https://auth.itunes.apple.com/auth/v1/native/fast/"
+        );
+        assert_eq!(
+            normalize_auth_url("https://auth.itunes.apple.com/auth/v1/native/fast"),
+            "https://auth.itunes.apple.com/auth/v1/native/fast/"
+        );
+    }
+
+    #[test]
+    fn only_approves_apple_https_auth_hosts() {
+        assert!(approved_auth_endpoint(DEFAULT_AUTH_ENDPOINT).is_some());
+        assert!(approved_auth_endpoint(
+            "https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate/"
+        )
+        .is_some());
+        assert!(approved_auth_endpoint("http://buy.itunes.apple.com/").is_none());
+        assert!(approved_auth_endpoint("https://evil.example.com/").is_none());
+        assert!(approved_auth_endpoint("https://pX-buy.itunes.apple.com/").is_none());
+        assert!(approved_auth_endpoint("https://buy.itunes.apple.com:8443/").is_none());
+    }
+
+    #[test]
+    fn treats_only_temporary_statuses_as_transient() {
+        for status in [204, 404, 429, 500, 503] {
+            assert!(is_transient_auth_status(status));
+        }
+        for status in [200, 301, 302, 403] {
+            assert!(!is_transient_auth_status(status));
+        }
+        assert_eq!(retry_after("12"), Some(Duration::from_secs(12)));
     }
 }

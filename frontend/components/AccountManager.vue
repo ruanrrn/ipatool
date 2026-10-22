@@ -185,6 +185,7 @@ const loginAccount = async () => {
   logging.value = true
 
   try {
+    // 签名登录遇到 Apple 临时错误会退避重试，可能超过默认 30s；登录不可重放，不自动重试
     const { response, data } = await apiFetch(`${API_BASE}/login`, {
       method: 'POST',
       headers: {
@@ -197,7 +198,7 @@ const loginAccount = async () => {
         saveCredentials: savePassword.value,
         memo: newAccount.value.memo || undefined,
       }),
-    })
+    }, { timeout: 120000, retries: 0 })
 
     if (!response.ok && !data.ok) {
       Toast.error(`登录失败：${data.error || '服务器错误'}`)
