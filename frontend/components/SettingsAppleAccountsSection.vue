@@ -15,11 +15,10 @@
         <div class="sr-label">
           {{ account.email }}
           <span
-            v-if="account.lastRefreshedAt != null"
-            class="sr-freshness"
-            :class="getFreshnessClass(account.lastRefreshedAt)"
+            v-if="account.loggedInAt"
+            class="sr-login-time"
           >
-            {{ getFreshnessLabel(account.lastRefreshedAt) }}
+            {{ getLoginLabel(account.loggedInAt) }}
           </span>
         </div>
       </div>
@@ -27,14 +26,11 @@
         <span>{{ getRegionLabel(account.region || 'US') }}</span>
         <button
           class="sr-btn sr-btn--refresh"
-          :disabled="refreshingToken === account.token"
-          @click.stop="emit('refresh-account', account)"
+          title="重新登录"
+          aria-label="重新登录"
+          @click.stop="emit('relogin-account', account)"
         >
-          <span
-            v-if="refreshingToken === account.token"
-            class="sr-btn__spinner"
-          />
-          <span v-else>↻</span>
+          ↻
         </button>
         <button
           class="sr-btn sr-btn--delete"
@@ -65,7 +61,7 @@
 </template>
 
 <script setup>
-const emit = defineEmits(['delete-account', 'navigate-to-account', 'refresh-account'])
+const emit = defineEmits(['delete-account', 'navigate-to-account', 'relogin-account'])
 
 defineProps({
   accounts: {
@@ -76,21 +72,13 @@ defineProps({
     type: Function,
     required: true
   },
-  getFreshnessClass: {
-    type: Function,
-    required: true
-  },
-  getFreshnessLabel: {
+  getLoginLabel: {
     type: Function,
     required: true
   },
   getRegionLabel: {
     type: Function,
     required: true
-  },
-  refreshingToken: {
-    type: [String, Number, null],
-    default: null
   }
 })
 </script>

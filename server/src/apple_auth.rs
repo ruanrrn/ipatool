@@ -745,8 +745,8 @@ pub struct AccountStore {
     pub store: Store,
     pub account_email: String,
     pub auth_info: Option<AuthInfo>,
-    /// 记录上次成功认证的时间，用于自动刷新判断
-    pub last_authenticated_at: std::time::Instant,
+    /// 上次成功登录的时间（Unix 秒），用于展示"登录于 X 天前"
+    pub authenticated_at: i64,
 }
 
 impl AccountStore {
@@ -755,17 +755,17 @@ impl AccountStore {
             store: Store::new(),
             account_email: email.to_string(),
             auth_info: None,
-            last_authenticated_at: std::time::Instant::now(),
+            authenticated_at: chrono::Utc::now().timestamp(),
         }
     }
 
     /// 从持久化的登录态恢复账号（服务重启后使用）。
-    pub fn restore(email: &str, guid: String, auth_info: AuthInfo) -> Self {
+    pub fn restore(email: &str, guid: String, auth_info: AuthInfo, authenticated_at: i64) -> Self {
         AccountStore {
             store: Store::with_guid(guid),
             account_email: email.to_string(),
             auth_info: Some(auth_info),
-            last_authenticated_at: std::time::Instant::now(),
+            authenticated_at,
         }
     }
 
@@ -801,7 +801,7 @@ impl AccountStore {
                     .map(String::from),
             };
             self.auth_info = Some(auth_info);
-            self.last_authenticated_at = std::time::Instant::now();
+            self.authenticated_at = chrono::Utc::now().timestamp();
         }
 
         Ok(result)
@@ -827,10 +827,5 @@ impl AccountStore {
         self.store
             .ensure_license(app_identifier, app_ver_id, auth_info)
             .await
-    }
-
-    /// 标记认证时间为"刚刚"，供外部刷新成功后调用
-    pub fn touch_authenticated(&mut self) {
-        self.last_authenticated_at = std::time::Instant::now();
     }
 }

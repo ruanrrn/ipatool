@@ -11,13 +11,11 @@
         <SettingsAppleAccountsSection
           :accounts="accounts"
           :get-account-key="getAccountKey"
-          :get-freshness-class="getFreshnessClass"
-          :get-freshness-label="getFreshnessLabel"
+          :get-login-label="getLoginLabel"
           :get-region-label="getRegionLabel"
-          :refreshing-token="refreshingToken"
           @delete-account="handleDeleteAccount"
           @navigate-to-account="emit('navigate-to-account')"
-          @refresh-account="handleRefreshAccount"
+          @relogin-account="(account) => emit('navigate-to-account', account.email)"
         />
 
         <SettingsGithubTokenSection
@@ -72,7 +70,6 @@ const { accounts, loadAccounts } = useAccounts()
 const appVersion = __APP_VERSION__
 const buildId = __APP_BUILD_ID__
 
-const refreshingToken = ref(null)
 const githubTokenInput = ref('')
 const githubTokenSaving = ref(false)
 const githubTokenDeleting = ref(false)
@@ -91,21 +88,13 @@ const getAccountKey = (account, fallbackIndex = '') => accountIdentityKey(accoun
 
 const getRegionLabel = (region) => formatRegion(region)
 
-const FRESHNESS_THRESHOLD = 1800
-
-function getFreshnessLabel(lastRefreshedAt) {
-  const secs = lastRefreshedAt || 0
-  if (secs < 60) return '刚刚'
-  if (secs < 3600) return `${Math.floor(secs / 60)}分钟前`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}小时前`
-  return `${Math.floor(secs / 86400)}天前`
-}
-
-function getFreshnessClass(lastRefreshedAt) {
-  const secs = lastRefreshedAt || 0
-  if (secs < FRESHNESS_THRESHOLD * 0.7) return 'sr-freshness--fresh'
-  if (secs < FRESHNESS_THRESHOLD) return 'sr-freshness--warning'
-  return 'sr-freshness--stale'
+function getLoginLabel(loggedInAt) {
+  if (!loggedInAt) return ''
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - loggedInAt)
+  if (secs < 60) return '刚刚登录'
+  if (secs < 3600) return `登录于 ${Math.floor(secs / 60)} 分钟前`
+  if (secs < 86400) return `登录于 ${Math.floor(secs / 3600)} 小时前`
+  return `登录于 ${Math.floor(secs / 86400)} 天前`
 }
 
 async function handleSaveGithubToken() {
@@ -166,28 +155,6 @@ async function confirmLogout() {
     performLogout: false,
     toast: false
   })
-}
-
-async function handleRefreshAccount(account) {
-  if (!account.token) return
-  refreshingToken.value = account.token
-  try {
-    const { response, data } = await apiFetch(`${API_BASE}/login/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: account.token })
-    })
-    if (response.ok && data?.ok) {
-      Toast.success(`${account.email} 刷新成功`)
-      await loadAccounts()
-    } else {
-      Toast.error(data?.error || '刷新失败')
-    }
-  } catch {
-    Toast.error('刷新请求失败')
-  } finally {
-    refreshingToken.value = null
-  }
 }
 
 async function handleDeleteAccount(account) {
@@ -477,25 +444,12 @@ async function handleDeleteAccount(account) {
   color: var(--color-danger, #ef4444);
 }
 
-/* Account freshness indicator */
-.sr-freshness {
+/* Account login time */
+.sr-login-time {
   font-size: var(--font-size-micro);
   font-weight: 500;
-  padding: 1px 6px;
-  border-radius: var(--radius-md);
   white-space: nowrap;
-}
-.sr-freshness--fresh {
-  color: var(--color-success);
-  background: var(--color-success-soft);
-}
-.sr-freshness--warning {
-  color: var(--color-warning-dark);
-  background: var(--color-warning-soft);
-}
-.sr-freshness--stale {
-  color: var(--color-danger);
-  background: var(--color-danger-soft);
+  color: var(--color-text-secondary, #6e6e80);
 }
 
 /* Row right */
@@ -565,17 +519,4 @@ async function handleDeleteAccount(account) {
   background: rgba(239, 68, 68, 0.15);
 }
 
-/* Refresh spinner */
-.sr-btn__spinner {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--color-text-tertiary, #c0c0c0);
-  border-top-color: var(--color-primary, #10a37f);
-  border-radius: 50%;
-  animation: sr-spin 0.6s linear infinite;
-}
-@keyframes sr-spin {
-  to { transform: rotate(360deg); }
-}
 </style>
