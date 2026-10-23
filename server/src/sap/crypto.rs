@@ -207,11 +207,12 @@ pub fn rsa_oaep(
 }
 
 /// AES-128-CBC over whole blocks, without padding.
+#[allow(clippy::manual_is_multiple_of)]
 pub fn cbc(bytes: &[u8], key: &[u8], iv: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
     if key.len() != 16
         || iv.len() != 16
         || bytes.is_empty()
-        || !bytes.len().is_multiple_of(16)
+        || bytes.len() % 16 != 0
         || bytes.len() > 1_048_576
     {
         return Err("Invalid SAP AES blocks".to_string());
