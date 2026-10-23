@@ -1732,7 +1732,11 @@ mod tests {
             })
             .unwrap();
         let downloads_dir = PathBuf::from(
-            std::env::var("TMPDIR").unwrap_or_else(|_| "/root/.hermes/cache/scratch".into()),
+            std::env::var("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .to_string_lossy()
+                .into_owned(),
         );
         let state = web::Data::new(AppState {
             download_manager: Arc::new(DownloadManager::new(db.clone(), downloads_dir.clone())),
