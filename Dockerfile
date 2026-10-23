@@ -24,7 +24,7 @@ RUN pnpm run build && \
     echo "Frontend build completed successfully"
 
 # Rust 后端构建阶段
-FROM rust:1.85-slim AS backend-builder
+FROM rust:1.86-slim AS backend-builder
 
 # rust:1.84-slim 镜像中 Cargo 已经在 /usr/local/cargo/bin
 # 不需要设置额外的环境变量
