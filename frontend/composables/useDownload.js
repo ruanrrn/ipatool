@@ -163,8 +163,25 @@ export function useDownload(options = {}) {
 
   const downloadBlocked = computed(() => checkingPurchaseStatus.value || purchaseRequired.value)
 
+  const isStoreMismatchError = (msg) => {
+    if (!msg || typeof msg !== 'string') return false
+    return /account not in this store/i.test(msg) ||
+      /not valid for use in the .* store/i.test(msg)
+  }
+
+  const getStoreMismatchMessage = (account) => {
+    const reg = account?.region ? `（如 ${account.region}）` : ''
+    return `当前选中的账号区域${reg}与该应用所在商店不一致，请切换为对应区域账号`
+  }
+
   const downloadBlockedReason = computed(() => {
     if (checkingPurchaseStatus.value) return '正在检测购买状态…'
+    const accountIndex = selectedAccount.value
+    const account = accountIndex !== null && accountIndex !== undefined ? accounts.value[accountIndex] : null
+    const err = purchaseStatus.value?.error || ''
+    if (isStoreMismatchError(err)) {
+      return getStoreMismatchMessage(account)
+    }
     if (!purchaseRequired.value) return ''
     const price = getSelectedAppPrice()
     if (price !== null && price > 0) return '当前账号未购买：请先在App Store购买应用'
@@ -253,6 +270,9 @@ export function useDownload(options = {}) {
         purchaseStatusText.value = price !== null && price > 0 ? '当前账号已购买' : '当前账号已领取'
       } else if (payload.needsPurchase) {
         purchaseStatusText.value = price !== null && price > 0 ? '当前账号未购买' : '当前账号未领取'
+      } else if (isStoreMismatchError(payload.error)) {
+        const reg = account?.region ? `（如 ${account.region}）` : ''
+        purchaseStatusText.value = `账号区域${reg}与应用商店不一致`
       } else {
         purchaseStatusText.value = payload.error ? `检测失败：${payload.error}` : '状态未知'
       }
@@ -288,6 +308,12 @@ export function useDownload(options = {}) {
       if (payload.purchased) {
         purchaseStatusText.value = price !== null && price > 0 ? '当前账号已购买' : '当前账号已领取'
         return true
+      }
+
+      if (isStoreMismatchError(payload.error)) {
+        const reg = account?.region ? `（如 ${account.region}）` : ''
+        purchaseStatusText.value = `账号区域${reg}与应用商店不一致`
+        return false
       }
 
       if (payload.needsPurchase) {
@@ -330,6 +356,12 @@ export function useDownload(options = {}) {
     if (!autoPurchase) {
       const allowed = await preflightPurchaseGate(account)
       if (!allowed) {
+        const err = purchaseStatus.value?.error || ''
+        if (isStoreMismatchError(err)) {
+          const msg = getStoreMismatchMessage(account)
+          addLog(`[拦截] ${msg}`)
+          throw new Error(msg)
+        }
         const price = getSelectedAppPrice()
         if (price !== null && price > 0) {
           addLog('[拦截] 当前账号未购买此应用，请先前往 App Store 购买后再下载')
@@ -385,6 +417,15 @@ export function useDownload(options = {}) {
       })
 
       if (!data.ok) {
+        const errMsg = data.error || ''
+        if (isStoreMismatchError(errMsg)) {
+          downloading.value = false
+          showProgress.value = false
+          activeDownloadAppId.value = ''
+          activeDownloadVersionId.value = ''
+          activeDownloadAccountEmail.value = ''
+          throw new Error(getStoreMismatchMessage(account))
+        }
         if (data.needsPurchase && !autoPurchase) {
           downloading.value = false
           showProgress.value = false
@@ -787,7 +828,11 @@ export function useDownload(options = {}) {
       })
 
       if (!response.ok || !data?.ok) {
-        throw new Error(data?.error || '获取应用失败')
+        const errMsg = data?.error || ''
+        if (isStoreMismatchError(errMsg)) {
+          throw new Error(getStoreMismatchMessage(account))
+        }
+        throw new Error(errMsg || '获取应用失败')
       }
 
       await refreshPurchaseStatus(appId, appVerId)

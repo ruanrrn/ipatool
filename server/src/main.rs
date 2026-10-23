@@ -315,10 +315,6 @@ fn load_saved_password(db: &Database, email: &str) -> Option<String> {
     .ok()
 }
 
-fn get_account_id_for_token(token: &str) -> String {
-    format!("tok_{}", &token[..token.len().min(16)])
-}
-
 fn hash_password(password: &str) -> String {
     Database::hash_password(password)
 }
@@ -2604,7 +2600,7 @@ async fn claim_app(req: web::Json<ClaimRequest>, data: web::Data<AppState>) -> i
 
                         if verify_state == "success" {
                             // Record the purchase in DB
-                            let account_id = get_account_id_for_token(&req.token);
+                            let account_id = account_store.account_email.clone();
                             {
                                 let db = data.db.lock().unwrap_or_else(|e| e.into_inner());
                                 let _ = db.record_purchase(&account_id, &req.appid, "claim");
@@ -2688,7 +2684,7 @@ async fn get_purchase_status(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = get_account_id_for_token(&query.token);
+    let account_id = account_store.account_email.clone();
     let appid = query.appid.clone();
 
     // L1: Check DB for known purchased apps
@@ -2814,7 +2810,7 @@ async fn purchase_status_batch(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = get_account_id_for_token(&req.token);
+    let account_id = account_store.account_email.clone();
 
     if req.appids.is_empty() {
         return HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
@@ -2996,7 +2992,7 @@ async fn confirm_purchase(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = get_account_id_for_token(&req.token);
+    let account_id = account_store.account_email.clone();
 
     // Force call Apple API - ignore cache TTL
     match account_store.download_product(&req.appid, None).await {

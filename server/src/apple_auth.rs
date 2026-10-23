@@ -108,6 +108,171 @@ fn storefront_region(code: &str) -> Option<&'static str> {
     }
 }
 
+pub fn region_to_storefront_code(region: &str) -> Option<&'static str> {
+    match region.trim().to_uppercase().as_str() {
+        "AE" => Some("143481"),
+        "AG" => Some("143540"),
+        "AI" => Some("143538"),
+        "AL" => Some("143575"),
+        "AM" => Some("143524"),
+        "AO" => Some("143564"),
+        "AR" => Some("143505"),
+        "AT" => Some("143445"),
+        "AU" => Some("143460"),
+        "AZ" => Some("143568"),
+        "BB" => Some("143541"),
+        "BD" => Some("143490"),
+        "BE" => Some("143446"),
+        "BG" => Some("143526"),
+        "BH" => Some("143559"),
+        "BM" => Some("143542"),
+        "BN" => Some("143560"),
+        "BO" => Some("143556"),
+        "BR" => Some("143503"),
+        "BS" => Some("143539"),
+        "BW" => Some("143525"),
+        "BY" => Some("143565"),
+        "BZ" => Some("143555"),
+        "CA" => Some("143455"),
+        "CH" => Some("143459"),
+        "CI" => Some("143527"),
+        "CL" => Some("143483"),
+        "CN" => Some("143465"),
+        "CO" => Some("143501"),
+        "CR" => Some("143495"),
+        "CY" => Some("143557"),
+        "CZ" => Some("143489"),
+        "DE" => Some("143443"),
+        "DK" => Some("143458"),
+        "DM" => Some("143545"),
+        "DO" => Some("143508"),
+        "DZ" => Some("143563"),
+        "EC" => Some("143509"),
+        "EE" => Some("143518"),
+        "EG" => Some("143516"),
+        "ES" => Some("143454"),
+        "FI" => Some("143447"),
+        "FR" => Some("143442"),
+        "GB" | "UK" => Some("143444"),
+        "GD" => Some("143546"),
+        "GH" => Some("143573"),
+        "GR" => Some("143448"),
+        "GT" => Some("143504"),
+        "GY" => Some("143553"),
+        "HK" => Some("143463"),
+        "HN" => Some("143510"),
+        "HR" => Some("143494"),
+        "HU" => Some("143482"),
+        "ID" => Some("143476"),
+        "IE" => Some("143449"),
+        "IL" => Some("143491"),
+        "IN" => Some("143467"),
+        "IS" => Some("143558"),
+        "IT" => Some("143450"),
+        "JM" => Some("143511"),
+        "JO" => Some("143528"),
+        "JP" => Some("143462"),
+        "KE" => Some("143529"),
+        "KN" => Some("143548"),
+        "KR" => Some("143466"),
+        "KW" => Some("143493"),
+        "KY" => Some("143544"),
+        "KZ" => Some("143517"),
+        "LB" => Some("143497"),
+        "LC" => Some("143549"),
+        "LI" => Some("143522"),
+        "LK" => Some("143486"),
+        "LT" => Some("143520"),
+        "LU" => Some("143451"),
+        "LV" => Some("143519"),
+        "MD" => Some("143523"),
+        "MG" => Some("143531"),
+        "MK" => Some("143530"),
+        "ML" => Some("143532"),
+        "MN" => Some("143592"),
+        "MO" => Some("143515"),
+        "MS" => Some("143547"),
+        "MT" => Some("143521"),
+        "MU" => Some("143533"),
+        "MV" => Some("143488"),
+        "MX" => Some("143468"),
+        "MY" => Some("143473"),
+        "NE" => Some("143534"),
+        "NG" => Some("143561"),
+        "NI" => Some("143512"),
+        "NL" => Some("143452"),
+        "NO" => Some("143457"),
+        "NP" => Some("143484"),
+        "NZ" => Some("143461"),
+        "OM" => Some("143562"),
+        "PA" => Some("143485"),
+        "PE" => Some("143507"),
+        "PH" => Some("143474"),
+        "PK" => Some("143477"),
+        "PL" => Some("143478"),
+        "PT" => Some("143453"),
+        "PY" => Some("143513"),
+        "QA" => Some("143498"),
+        "RO" => Some("143487"),
+        "RS" => Some("143500"),
+        "RU" => Some("143469"),
+        "SA" => Some("143479"),
+        "SE" => Some("143456"),
+        "SG" => Some("143464"),
+        "SI" => Some("143499"),
+        "SK" => Some("143496"),
+        "SN" => Some("143535"),
+        "SR" => Some("143554"),
+        "SV" => Some("143506"),
+        "TC" => Some("143552"),
+        "TH" => Some("143475"),
+        "TN" => Some("143536"),
+        "TR" => Some("143480"),
+        "TT" => Some("143551"),
+        "TW" => Some("143470"),
+        "TZ" => Some("143572"),
+        "UA" => Some("143492"),
+        "UG" => Some("143537"),
+        "US" => Some("143441"),
+        "UY" => Some("143514"),
+        "UZ" => Some("143566"),
+        "VC" => Some("143550"),
+        "VE" => Some("143502"),
+        "VG" => Some("143543"),
+        "VN" => Some("143471"),
+        "YE" => Some("143571"),
+        "ZA" => Some("143472"),
+        _ => None,
+    }
+}
+
+pub fn region_to_storefront_header(region: &str) -> Option<String> {
+    let clean = region.trim().to_uppercase();
+    match clean.as_str() {
+        "CN" => Some("143465-19,29".to_string()),
+        "US" => Some("143441-1,29".to_string()),
+        "JP" => Some("143462-9,29".to_string()),
+        "GB" | "UK" => Some("143444-2,29".to_string()),
+        "DE" => Some("143443-2,29".to_string()),
+        "FR" => Some("143442-3,29".to_string()),
+        "CA" => Some("143455-6,29".to_string()),
+        "AU" => Some("143460-14,29".to_string()),
+        "HK" => Some("143463-20,29".to_string()),
+        "TW" => Some("143470-20,29".to_string()),
+        "KR" => Some("143466-19,29".to_string()),
+        "SG" => Some("143464-2,29".to_string()),
+        other => {
+            if let Some(code) = region_to_storefront_code(other) {
+                Some(format!("{}-1,29", code))
+            } else if clean.chars().all(|c| c.is_ascii_digit()) && !clean.is_empty() {
+                Some(format!("{}-1,29", clean))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn normalize_region_candidate(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -816,6 +981,13 @@ impl Store {
         if let Some(token) = &auth_info.password_token {
             headers.insert("X-Token", token.parse().unwrap());
         }
+        if let Some(region) = &auth_info.region {
+            if let Some(sf) = region_to_storefront_header(region) {
+                if let Ok(hdr_val) = sf.parse() {
+                    headers.insert("X-Apple-Store-Front", hdr_val);
+                }
+            }
+        }
 
         let response = self
             .client
@@ -870,6 +1042,13 @@ impl Store {
         }
         if let Some(token) = &auth_info.password_token {
             headers.insert("X-Token", token.parse().unwrap());
+        }
+        if let Some(region) = &auth_info.region {
+            if let Some(sf) = region_to_storefront_header(region) {
+                if let Ok(hdr_val) = sf.parse() {
+                    headers.insert("X-Apple-Store-Front", hdr_val);
+                }
+            }
         }
 
         let response = self
@@ -1054,5 +1233,29 @@ mod tests {
             assert!(!is_transient_auth_status(status));
         }
         assert_eq!(retry_after("12"), Some(Duration::from_secs(12)));
+    }
+
+    #[test]
+    fn maps_regions_to_storefront_headers() {
+        assert_eq!(
+            region_to_storefront_header("CN"),
+            Some("143465-19,29".to_string())
+        );
+        assert_eq!(
+            region_to_storefront_header("US"),
+            Some("143441-1,29".to_string())
+        );
+        assert_eq!(
+            region_to_storefront_header("jp"),
+            Some("143462-9,29".to_string())
+        );
+        assert_eq!(
+            region_to_storefront_header("DE"),
+            Some("143443-2,29".to_string())
+        );
+        assert_eq!(
+            region_to_storefront_header("AE"),
+            Some("143481-1,29".to_string())
+        );
     }
 }
