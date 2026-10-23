@@ -70,10 +70,13 @@
     box-sizing: border-box;
     border-color: var(--separator);
     box-shadow: none !important;
+    touch-action: manipulation;
   }
 
   html, body, #app {
     min-height: 100%;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   html,
@@ -86,6 +89,7 @@
     line-height: 1.45;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    touch-action: manipulation;
   }
 
   h1, h2, h3, h4, h5, h6, p {
@@ -105,10 +109,36 @@
   }
 
   button,
+  [role="button"],
+  a,
   input,
   textarea,
   select {
     font: inherit;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button,
+  [role="button"],
+  .mobile-tab,
+  .desktop-tab {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* Form controls must be at least 16px to prevent iOS Safari focus auto-zoom */
+  input[type="text"],
+  input[type="password"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="number"],
+  input[type="search"],
+  input[type="url"],
+  textarea,
+  select,
+  .mobile-input__field {
+    font-size: 16px !important;
   }
 
   button,
@@ -312,6 +342,12 @@
   .empty-state,
   .section-shell {
     padding: var(--space-4);
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
   }
 }
 

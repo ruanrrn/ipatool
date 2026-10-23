@@ -24,7 +24,7 @@
         <textarea
           :value="notes"
           rows="3"
-          class="w-full rounded border border-border dark:border-border-dark bg-bg dark:bg-bg-dark px-3 py-2 text-sm text-txt dark:text-txt-dark focus:outline-none focus:ring-1 focus:ring-primary"
+          class="w-full rounded-xl border border-border dark:border-border-dark bg-bg dark:bg-bg-dark px-3 py-2 text-[16px] text-txt dark:text-txt-dark focus:outline-none focus:ring-1 focus:ring-primary"
           placeholder="可选备注..."
           @input="emit('update:notes', $event.target.value)"
         />

@@ -20,5 +20,23 @@ import './style.css'
 const app = createApp(App)
 const pinia = createPinia()
 
+// Prevent iOS Safari pinch-to-zoom / multi-touch gesture zoom
+if (typeof document !== 'undefined') {
+  document.addEventListener(
+    'gesturestart',
+    (e) => {
+      e.preventDefault()
+    },
+    { passive: false }
+  )
+  document.addEventListener(
+    'gesturechange',
+    (e) => {
+      e.preventDefault()
+    },
+    { passive: false }
+  )
+}
+
 app.use(pinia)
 app.mount('#app')

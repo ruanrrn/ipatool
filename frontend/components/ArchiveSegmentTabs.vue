@@ -62,6 +62,9 @@ const emit = defineEmits(['update:modelValue'])
  cursor: pointer;
  transition: all 0.2s ease;
  -webkit-tap-highlight-color: transparent;
+ touch-action: manipulation;
+ user-select: none;
+ -webkit-user-select: none;
 }
 .dark .archive-seg {
  color: var(--color-text-muted, #a1a1aa);

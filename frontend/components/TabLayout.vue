@@ -321,31 +321,38 @@ watch(() => appStore.activeTab, () => {
   inset-inline: 0;
   bottom: 0;
   z-index: 50;
-  background: var(--color-surface, #fff);
+  background: rgba(255, 255, 255, 0.92);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
   padding-bottom: env(safe-area-inset-bottom);
   border-top: 1px solid var(--color-border-light, #f0f0f0);
 }
 
 .mobile-tabs {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-around;
-  height: 72px;
-  padding: 10px 16px 0;
+  height: 52px;
+  padding: 2px 12px 0;
 }
 
 .mobile-tab {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 64px;
+  justify-content: center;
+  gap: 2px;
+  min-width: 60px;
+  height: 48px;
   border: 0;
   background: transparent;
-  border-radius: 16px;
+  border-radius: 12px;
   cursor: pointer;
-  padding: 6px 10px 8px;
+  padding: 4px 8px;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
   transition: background 0.2s ease, color 0.2s ease;
 }
 
@@ -358,13 +365,13 @@ watch(() => appStore.activeTab, () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: var(--size-tab-icon);
-  height: var(--size-tab-icon);
+  width: 22px;
+  height: 22px;
 }
 
 .mobile-tab .tab-layout__icon {
-  width: var(--size-tab-icon);
-  height: var(--size-tab-icon);
+  width: 22px;
+  height: 22px;
   color: var(--color-text-muted, #6e6e80);
   transition: color 0.2s ease;
 }
@@ -374,10 +381,10 @@ watch(() => appStore.activeTab, () => {
 }
 
 .mobile-tab__label {
-  font-size: var(--font-size-micro);
+  font-size: 11px;
   font-weight: 500;
   color: var(--color-text-muted, #6e6e80);
-  line-height: 1.3;
+  line-height: 1.2;
   transition: color 0.2s ease;
 }
 
@@ -405,7 +412,7 @@ watch(() => appStore.activeTab, () => {
 }
 
 .tab-content.with-mobile-tabs {
-  padding-bottom: calc(72px + env(safe-area-inset-bottom) + 8px);
+  padding-bottom: calc(52px + env(safe-area-inset-bottom) + 8px);
 }
 
 /* ===== Dark Mode ===== */
@@ -427,7 +434,7 @@ watch(() => appStore.activeTab, () => {
 }
 
 .dark .mobile-tabs-wrap {
-  background: var(--color-surface, #18181b);
+  background: rgba(24, 24, 27, 0.88);
   border-top-color: var(--color-border, #3f3f46);
 }
 

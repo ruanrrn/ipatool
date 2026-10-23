@@ -203,7 +203,7 @@ const handleFocus = (e) => {
   if (typeof window !== 'undefined' && 'visualViewport' in window) {
     setTimeout(() => {
       try {
-        e.target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        e.target?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
       } catch {
         // ignore
       }

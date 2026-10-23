@@ -207,8 +207,8 @@ onBeforeUnmount(() => {
 }
 
 .mobile-dialog__close {
-  min-width: 28px;
-  min-height: 28px;
+  min-width: 32px;
+  min-height: 32px;
   border: none;
   border-radius: var(--radius-lg, 10px);
   background: transparent;
@@ -219,7 +219,25 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  position: relative;
   transition: color 0.2s ease;
+}
+
+@media (pointer: coarse) {
+  .mobile-dialog__close::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+    width: 100%;
+    height: 100%;
+  }
 }
 
 .mobile-dialog__close:active {
@@ -243,6 +261,14 @@ onBeforeUnmount(() => {
 
 .mobile-dialog__footer {
   padding: 0 24px 24px;
+}
+
+.mobile-dialog__panel--bottom .mobile-dialog__footer {
+  padding-bottom: calc(24px + max(env(safe-area-inset-bottom), var(--kb-inset-bottom, 0px)));
+}
+
+.mobile-dialog__panel--bottom:has(.mobile-dialog__footer) .mobile-dialog__body {
+  padding-bottom: 16px;
 }
 
 /* ==================== Animations ==================== */

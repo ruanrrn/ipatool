@@ -96,17 +96,34 @@ const handleClick = (e) => {
   cursor: pointer;
   transition: all 0.2s ease;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
   position: relative;
   overflow: hidden;
 }
 
 /* 尺寸变体 */
 .mobile-button--small {
-  min-height: 32px;
-  min-width: 32px;
-  padding: 6px 12px;
-  font-size: 12px;
+  min-height: 34px;
+  min-width: 34px;
+  padding: 6px 14px;
+  font-size: 13px;
+  touch-action: manipulation;
+}
+
+@media (pointer: coarse) {
+  .mobile-button--small::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+    width: 100%;
+    height: 100%;
+  }
 }
 
 .mobile-button--medium {
