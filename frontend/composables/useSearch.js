@@ -231,7 +231,7 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ token, appids })
-      })
+      }, { timeout: 240000, retries: 0 })
       if (!isCurrent()) return
 
       if (response?.ok !== false && data?.ok && data?.data?.results) {

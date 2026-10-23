@@ -76,6 +76,13 @@ RUN --mount=type=cache,target=/app/target,id=cargo_cache,sharing=locked \
     ls -lh /app/server && \
     echo "Binary copied successfully"
 
+# Native kbsync helper (source-only: Apple runtime assets are fetched on first use)
+FROM golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS kbsync-builder
+RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal && rm -rf /var/lib/apt/lists/*
+WORKDIR /helper
+COPY scripts/kbsync-helper/ ./
+RUN python3 verify-source.py && go mod verify && go test -mod=readonly ./... && go build -mod=readonly -trimpath -buildvcs=false -o /ipatool-kbsync .
+
 # 生产环境镜像
 FROM debian:bookworm-slim
 
@@ -94,6 +101,8 @@ COPY --from=frontend-builder /app/dist ./dist
 
 # 从 backend-builder 阶段复制构建好的后端二进制文件
 COPY --from=backend-builder /app/server ./server
+COPY --from=kbsync-builder /ipatool-kbsync ./ipatool-kbsync
+ENV XDG_CACHE_HOME=/app/data/cache
 
 # 创建数据目录并设置权限
 RUN mkdir -p /app/data && \

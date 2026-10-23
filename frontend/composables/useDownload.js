@@ -266,7 +266,7 @@ export function useDownload(options = {}) {
     try {
       const query = `token=${encodeURIComponent(token)}&appid=${encodeURIComponent(targetAppId)}`
       const versionParam = appVerId ? `&appVerId=${encodeURIComponent(appVerId)}` : ''
-      const { response, data } = await apiFetch(`${API_BASE}/purchase-status?${query}${versionParam}`)
+      const { response, data } = await apiFetch(`${API_BASE}/purchase-status?${query}${versionParam}`, {}, { timeout: 240000, retries: 0 })
       if (!isCurrent()) return false
       if (response?.ok === false || !data?.ok) throw new Error(data?.error || '检测购买状态失败')
       const payload = data?.data || {}

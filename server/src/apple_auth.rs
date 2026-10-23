@@ -466,6 +466,33 @@ fn build_xml_plist_body(fields: &[(&str, String)]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+fn build_download_plist_body(
+    appid: &str,
+    guid: &str,
+    version: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let id: i64 = appid
+        .parse()
+        .map_err(|_| "Apple app ID must be a positive integer")?;
+    if id <= 0 {
+        return Err("Apple app ID must be a positive integer".into());
+    }
+    let mut dict = plist::Dictionary::new();
+    dict.insert("creditDisplay".into(), plist::Value::String(String::new()));
+    dict.insert("guid".into(), plist::Value::String(guid.into()));
+    dict.insert("salableAdamId".into(), plist::Value::Integer(id.into()));
+    dict.insert("serialNumber".into(), plist::Value::String("0".into()));
+    if let Some(version) = version {
+        dict.insert(
+            "externalVersionId".into(),
+            plist::Value::String(version.into()),
+        );
+    }
+    let mut bytes = Vec::new();
+    plist::to_writer_xml(&mut bytes, &plist::Value::Dictionary(dict)).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthInfo {
     pub ds_person_id: Option<String>,
@@ -1183,16 +1210,7 @@ impl Store {
     ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = self.store_endpoint("volumeStoreDownloadProduct");
 
-        let mut download_data = vec![
-            ("creditDisplay", "".to_string()),
-            ("guid", self.guid.clone()),
-            ("salableAdamId", app_identifier.to_string()),
-        ];
-        if let Some(ver_id) = app_ver_id {
-            download_data.push(("externalVersionId", ver_id.to_string()));
-        }
-
-        let download_body = build_xml_plist_body(&download_data)
+        let download_body = build_download_plist_body(app_identifier, &self.guid, app_ver_id)
             .map_err(|e| format!("failed to build download plist body: {}", e))?;
 
         let mut headers = Self::apple_plist_headers();
@@ -1211,11 +1229,29 @@ impl Store {
             }
         }
 
-        let response = self.post_store_plist(&url, headers, download_body).await?;
+        let response = self
+            .post_store_plist(&url, headers.clone(), download_body)
+            .await?;
 
         let body_text = response.text().await?;
         let mut result = parse_apple_plist_response(&body_text)
             .map_err(|e| format!("failed to parse download response: {}", e))?;
+        if crate::apple_download_recovery::needs_download_recovery(&result) {
+            log::info!("Apple legacy download returned no usable item; requesting device-bound DownloadDispatch authorization");
+            result = crate::apple_download_recovery::recover(
+                &self.client,
+                headers,
+                &self.guid,
+                app_identifier,
+                app_ver_id,
+                auth_info
+                    .region
+                    .as_deref()
+                    .ok_or("下载恢复需要账号商店区域，请重新登录")?,
+            )
+            .await
+            .map_err(|e| format!("Apple 下载授权恢复失败: {e}"))?;
+        }
         let has_failure = result
             .get("failureType")
             .and_then(|v| v.as_str())
@@ -1692,6 +1728,18 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
             task.await.unwrap();
         }
+    }
+
+    #[test]
+    fn legacy_download_payload_preserves_apple_field_types() {
+        let bytes =
+            build_download_plist_body("1596063349", "AABBCCDDEEFF", Some("893559076")).unwrap();
+        let value: plist::Value = plist::from_bytes(&bytes).unwrap();
+        let dict = value.as_dictionary().unwrap();
+        assert_eq!(dict["salableAdamId"].as_signed_integer(), Some(1596063349));
+        assert_eq!(dict["serialNumber"].as_string(), Some("0"));
+        assert_eq!(dict["externalVersionId"].as_string(), Some("893559076"));
+        assert!(build_download_plist_body("not-an-id", "AABBCCDDEEFF", None).is_err());
     }
 
     #[test]

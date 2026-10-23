@@ -228,6 +228,19 @@ async fn dispatch(
                 safe.insert(reqwest::header::HeaderName::from_static(key), v.clone());
             }
         }
+        if let Some(front) = safe
+            .get("x-apple-store-front")
+            .and_then(|v| v.to_str().ok())
+        {
+            let base = front.split('-').next().unwrap_or("");
+            if base.is_empty() || !base.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("invalid account storefront for ent/download".into());
+            }
+            let base = base
+                .parse()
+                .map_err(|_| "invalid account storefront for ent/download")?;
+            safe.insert("x-apple-store-front", base);
+        }
     }
     safe.insert(reqwest::header::USER_AGENT, USER_AGENT.parse().unwrap());
     safe.insert(
@@ -828,7 +841,10 @@ mod tests {
                 assert!(request.contains("x-dsid:"));
                 assert!(request.contains("cookie: session=owned"));
                 assert_eq!(request.contains("x-token: secret"), preferred);
-                assert_eq!(request.contains("x-apple-store-front:"), preferred);
+                assert_eq!(
+                    request.contains("x-apple-store-front: 143441\r\n"),
+                    preferred
+                );
                 assert!(!request.contains("evil-cookie"));
                 socket
                     .write_all(
@@ -1017,7 +1033,7 @@ mod tests {
             let n = socket.read(&mut bytes).await.unwrap();
             let request = String::from_utf8_lossy(&bytes[..n]).to_string();
             assert!(request.contains("x-token: secret"));
-            assert!(request.contains("x-apple-store-front: 143441-1,29"));
+            assert!(request.contains("x-apple-store-front: 143441\r\n"));
             assert!(request.contains("application/x-www-form-urlencoded; charset=utf-8"));
             assert!(request.contains("Configurator/2.18"));
             socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();

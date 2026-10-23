@@ -29,6 +29,17 @@ test('claim does not report success when the verification request fails', async 
   assert.equal(state.claimingSelectedApp.value, false)
 })
 
+test('authorization checks allow bounded first-time device proof generation without transport retries', async () => {
+  let control
+  const { state } = setupDownload(async (_url, _options, fetchControl) => {
+    control = fetchControl
+    return success(owned)
+  })
+  await state.refreshPurchaseStatus()
+  assert.equal(control?.timeout, 240000)
+  assert.equal(control?.retries, 0)
+})
+
 const success = payload => ({ response: { ok: true }, data: { ok: true, data: payload } })
 const owned = { purchased: true, needsPurchase: false, status: 'owned' }
 const notOwned = { purchased: false, needsPurchase: true, status: 'not_owned' }
