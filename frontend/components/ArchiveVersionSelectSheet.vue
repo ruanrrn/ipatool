@@ -194,6 +194,10 @@ const isSelected = (version) => String(props.selectedVersionId || '') === getVer
   text-align: left;
   cursor: pointer;
   transition: all 0.2s ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .archive-version-option--selected {

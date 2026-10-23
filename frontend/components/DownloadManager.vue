@@ -109,10 +109,10 @@
             <span
               class="result-item__fav"
               :class="{ active: isAppFavorited(app.trackId) }"
-              @click.stop="quickToggleFavorite(app)"
               role="button"
               :aria-label="isAppFavorited(app.trackId) ? '取消收藏' : '收藏'"
               tabindex="0"
+              @click.stop="quickToggleFavorite(app)"
               @keydown.enter.prevent="quickToggleFavorite(app)"
               @keydown.space.prevent="quickToggleFavorite(app)"
             >
@@ -854,6 +854,12 @@ onBeforeUnmount(() => {
  border: 1px solid var(--color-border);
  cursor: pointer;
  transition: background 0.2s ease;
+ text-align: left;
+ width: 100%;
+ touch-action: manipulation;
+ -webkit-tap-highlight-color: transparent;
+ user-select: none;
+ -webkit-user-select: none;
 }
 
 .result-item:active {
@@ -935,8 +941,12 @@ onBeforeUnmount(() => {
   background: none;
   border: none;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 4px 8px;
   border-radius: 4px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .search-history__clear:hover {
   color: var(--color-text-secondary);
@@ -949,13 +959,17 @@ onBeforeUnmount(() => {
 }
 .search-history__tag {
   font-size: 12px;
-  padding: 4px 12px;
+  padding: 6px 12px;
   border-radius: 16px;
   background: var(--color-surface-muted);
   border: 1px solid var(--color-border);
   color: var(--color-text-secondary);
   cursor: pointer;
   transition: background 0.15s ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .search-history__tag:hover {
   background: var(--color-border-light);
@@ -1054,6 +1068,25 @@ onBeforeUnmount(() => {
  cursor: pointer;
  border-radius: 8px;
  transition: color 0.2s ease;
+ touch-action: manipulation;
+ -webkit-tap-highlight-color: transparent;
+ user-select: none;
+ -webkit-user-select: none;
+ position: relative;
+}
+
+@media (pointer: coarse) {
+  .result-item__fav::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+    width: 100%;
+    height: 100%;
+  }
 }
 
 .result-item__fav-count {

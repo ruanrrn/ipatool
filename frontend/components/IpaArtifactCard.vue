@@ -163,7 +163,25 @@ const formatFileSize = (bytes) => {
  cursor: pointer;
  transition: all 0.2s ease;
  -webkit-tap-highlight-color: transparent;
+ touch-action: manipulation;
+ user-select: none;
+ -webkit-user-select: none;
  padding: 0;
+ position: relative;
+}
+
+@media (pointer: coarse) {
+  .q-btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+    width: 100%;
+    height: 100%;
+  }
 }
 .dark .q-btn {
  background: var(--color-surface, #18181b);

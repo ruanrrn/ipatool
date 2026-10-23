@@ -91,7 +91,10 @@
           </div>
 
           <!-- Directory Browser Panel -->
-          <div v-if="showBrowser" class="webdav__browser">
+          <div
+            v-if="showBrowser"
+            class="webdav__browser"
+          >
             <div class="webdav__browser-header">
               <button
                 class="webdav__browser-nav"
@@ -103,7 +106,10 @@
               <span class="webdav__browser-path">{{ browserPath }}</span>
             </div>
             <div class="webdav__browser-body">
-              <div v-if="browseError" class="webdav__browse-error">
+              <div
+                v-if="browseError"
+                class="webdav__browse-error"
+              >
                 {{ browseError }}
               </div>
               <div
@@ -116,7 +122,10 @@
                 <span class="webdav__browser-icon">{{ entry.is_dir ? '📁' : '📄' }}</span>
                 <span class="webdav__browser-name">{{ entry.name }}</span>
               </div>
-              <div v-if="!browseError && entries.length === 0 && !browsing" class="webdav__browse-empty">
+              <div
+                v-if="!browseError && entries.length === 0 && !browsing"
+                class="webdav__browse-empty"
+              >
                 目录为空
               </div>
             </div>
@@ -395,11 +404,11 @@ function selectCurrent() {
 }
 .webdav__input {
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--color-border, #d4d4d8);
   background: var(--color-surface-muted, #f7f7f8);
-  font-size: 13px;
+  font-size: 16px;
   color: var(--color-text, #0d0d0d);
   outline: none;
   transition: border-color 0.15s ease;
@@ -428,15 +437,18 @@ function selectCurrent() {
 .webdav__browse-btn {
   flex-shrink: 0;
   padding: 8px 14px;
+  min-height: 40px;
   border-radius: 8px;
   border: 1px solid var(--color-border, #d4d4d8);
   background: var(--color-surface-muted, #f7f7f8);
   color: var(--color-text, #0d0d0d);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   transition: opacity 0.15s ease;
   white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .dark .webdav__browse-btn {
   background: var(--color-surface-muted, #27272a);
