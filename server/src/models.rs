@@ -278,6 +278,7 @@ pub struct PendingMfaSession {
 pub struct PurchaseCacheEntry {
     pub purchased: bool,
     pub needs_purchase: bool,
+    pub error: Option<String>,
     pub cached_at: std::time::Instant,
 }
 

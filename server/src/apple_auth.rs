@@ -475,9 +475,33 @@ pub struct AuthInfo {
     pub region: Option<String>,
 }
 
+/// Exact upstream session-expiry codes; never infer ownership from these failures.
+pub fn is_session_auth_failure(result: &HashMap<String, Value>) -> bool {
+    match result.get("failureType") {
+        Some(Value::String(code)) => matches!(code.as_str(), "2034" | "2042"),
+        Some(Value::Number(code)) => matches!(code.as_u64(), Some(2034 | 2042)),
+        _ => false,
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SessionSnapshot {
+    #[serde(default)]
+    cookies: Vec<Value>,
+    #[serde(default)]
+    pod: Option<String>,
+}
+
+fn valid_pod(pod: &str) -> bool {
+    !pod.is_empty() && pod.len() <= 10 && pod.bytes().all(|c| c.is_ascii_digit())
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     pub client: Client,
+    // All Store clones (including AccountStore clones) share the live session.
+    cookies: Arc<reqwest_cookie_store::CookieStoreMutex>,
+    pod: Arc<std::sync::Mutex<Option<String>>>,
     pub guid: String,
     /// SAP 签名会话：每次新登录重新建立，验证码步骤沿用同一个。
     signer: Arc<tokio::sync::Mutex<Option<SapSigner>>>,
@@ -493,18 +517,103 @@ impl Store {
     pub fn with_guid(guid: String) -> Self {
         // IMPORTANT: Apple auth flow can return 302 redirects that must be handled
         // by retrying POST to the redirect location. Disable automatic redirect following.
+        let cookies = Arc::new(reqwest_cookie_store::CookieStoreMutex::default());
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
-            .cookie_store(true)
+            .cookie_provider(Arc::clone(&cookies))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
 
         Store {
             client,
+            cookies,
+            pod: Arc::new(std::sync::Mutex::new(None)),
             guid,
             signer: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Export the complete cookie/pod session as JSON. Treat the result as a secret.
+    /// Include non-persistent session cookies: cookie_store's save_json omits them.
+    pub fn export_session_cookies(&self) -> Result<String, String> {
+        let cookies = self
+            .cookies
+            .lock()
+            .map_err(|_| "Apple cookie jar lock poisoned")?;
+        let pod = self.pod.lock().map_err(|_| "Apple pod lock poisoned")?;
+        let records = cookies
+            .iter_unexpired()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "Cannot serialize Apple cookies")?;
+        serde_json::to_string(&SessionSnapshot {
+            cookies: records,
+            pod: pod.clone(),
+        })
+        .map_err(|_| "Cannot serialize Apple session".to_string())
+    }
+
+    /// Replace the shared live session after validating the entire snapshot.
+    /// Empty input and missing fields support older persisted token-only sessions.
+    /// GUID and AuthInfo must be persisted separately by the caller.
+    pub fn import_session_cookies(&self, serialized: &str) -> Result<(), String> {
+        let snapshot: SessionSnapshot = if serialized.trim().is_empty() {
+            SessionSnapshot::default()
+        } else {
+            serde_json::from_str(serialized).map_err(|_| "Invalid Apple session JSON")?
+        };
+        if snapshot.pod.as_deref().is_some_and(|pod| !valid_pod(pod)) {
+            return Err("Invalid Apple session pod".into());
+        }
+        let mut lines = String::new();
+        for cookie in snapshot.cookies {
+            lines.push_str(&serde_json::to_string(&cookie).map_err(|_| "Invalid Apple cookie")?);
+            lines.push('\n');
+        }
+        let restored = reqwest_cookie_store::CookieStore::load_json(std::io::Cursor::new(lines))
+            .map_err(|_| "Invalid Apple session cookies")?;
+        // Lock order matches export; no partially imported state on validation/lock failure.
+        let mut cookies = self
+            .cookies
+            .lock()
+            .map_err(|_| "Apple cookie jar lock poisoned")?;
+        let mut pod = self.pod.lock().map_err(|_| "Apple pod lock poisoned")?;
+        *cookies = restored;
+        *pod = snapshot.pod;
+        Ok(())
+    }
+
+    pub fn session_pod(&self) -> Option<String> {
+        self.pod.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn observe_session_response(&self, url: &reqwest::Url, headers: &header::HeaderMap) {
+        if approved_auth_endpoint(url.as_str()).is_none() {
+            return;
+        }
+        let header_pod = headers
+            .get("pod")
+            .and_then(|v| v.to_str().ok())
+            .filter(|pod| valid_pod(pod));
+        let host_pod = url
+            .host_str()
+            .and_then(|host| host.strip_suffix("-buy.itunes.apple.com"))
+            .and_then(|host| host.strip_prefix('p'))
+            .filter(|pod| valid_pod(pod));
+        if let Some(pod) = header_pod.or(host_pod) {
+            *self.pod.lock().unwrap_or_else(|e| e.into_inner()) = Some(pod.to_string());
+        }
+    }
+
+    fn store_endpoint(&self, action: &str) -> String {
+        let pod = self.session_pod().unwrap_or_else(|| "25".into());
+        let mut url = reqwest::Url::parse(&format!(
+            "https://p{pod}-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/{action}"
+        ))
+        .expect("validated Apple pod");
+        url.query_pairs_mut().append_pair("guid", &self.guid);
+        url.to_string()
     }
 
     fn generate_guid() -> String {
@@ -788,6 +897,7 @@ impl Store {
             };
 
             let status = response.status();
+            self.observe_session_response(response.url(), response.headers());
             if let Some(region) = extract_region_from_headers(response.headers()) {
                 inferred_region = Some(region);
             }
@@ -804,6 +914,10 @@ impl Store {
                     });
                 match redirect {
                     Some(target) => {
+                        self.observe_session_response(
+                            &reqwest::Url::parse(&target)?,
+                            &header::HeaderMap::new(),
+                        );
                         url = Self::ensure_guid_query(&target, &self.guid);
                         log::info!("Apple auth redirect ({}) -> {}", status, url);
                         attempt -= 1;
@@ -936,16 +1050,71 @@ impl Store {
         Ok(final_result)
     }
 
+    /// Preserve POST body and authentication across Apple's Store pod redirects.
+    async fn post_store_plist(
+        &self,
+        endpoint: &str,
+        headers: header::HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
+        let mut url = reqwest::Url::parse(endpoint)?;
+        for hop in 0..=5 {
+            let response = self
+                .client
+                .post(url.clone())
+                .headers(headers.clone())
+                .body(body.clone())
+                .send()
+                .await?;
+            self.observe_session_response(response.url(), response.headers());
+            if !response.status().is_redirection() {
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Apple Store 请求失败（HTTP {}）",
+                        response.status().as_u16()
+                    )
+                    .into());
+                }
+                return Ok(response);
+            }
+            if hop == 5 {
+                return Err("Apple Store 重定向次数过多".into());
+            }
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("Apple Store 重定向缺少 Location")?;
+            let target = url.join(location)?;
+            let approved = target.scheme() == "https"
+                && target.username().is_empty()
+                && target.password().is_none()
+                && target.port().is_none()
+                && target.host_str().is_some_and(is_buy_host);
+            let local_test = cfg!(test)
+                && url.host_str() == Some("127.0.0.1")
+                && target.origin() == url.origin();
+            if !approved && !local_test {
+                return Err("Apple Store 重定向目标不可信".into());
+            }
+            self.observe_session_response(&target, &header::HeaderMap::new());
+            log::info!(
+                "Apple Store pod redirect: status={}, host={}",
+                response.status().as_u16(),
+                target.host_str().unwrap_or("")
+            );
+            url = target;
+        }
+        unreachable!()
+    }
+
     pub async fn ensure_license(
         &self,
         app_identifier: &str,
         app_ver_id: Option<&str>,
         auth_info: &AuthInfo,
     ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/buyProduct?guid={}",
-            self.guid
-        );
+        let url = self.store_endpoint("buyProduct");
 
         let mut purchase_data = vec![
             ("appExtVrsId", "0".to_string()),
@@ -989,13 +1158,7 @@ impl Store {
             }
         }
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .body(purchase_body)
-            .send()
-            .await?;
+        let response = self.post_store_plist(&url, headers, purchase_body).await?;
 
         let body_text = response.text().await?;
         let mut result = parse_apple_plist_response(&body_text)
@@ -1018,10 +1181,7 @@ impl Store {
         app_ver_id: Option<&str>,
         auth_info: &AuthInfo,
     ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid={}",
-            self.guid
-        );
+        let url = self.store_endpoint("volumeStoreDownloadProduct");
 
         let mut download_data = vec![
             ("creditDisplay", "".to_string()),
@@ -1051,13 +1211,7 @@ impl Store {
             }
         }
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .body(download_body)
-            .send()
-            .await?;
+        let response = self.post_store_plist(&url, headers, download_body).await?;
 
         let body_text = response.text().await?;
         let mut result = parse_apple_plist_response(&body_text)
@@ -1187,6 +1341,225 @@ impl AccountStore {
 mod tests {
     use super::*;
 
+    fn cookie_header(store: &Store, url: &str) -> String {
+        use reqwest::cookie::CookieStore;
+        store
+            .cookies
+            .cookies(&reqwest::Url::parse(url).unwrap())
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn session_roundtrip_preserves_session_cookies_and_scope() {
+        use reqwest::cookie::CookieStore;
+        let store = Store::with_guid("TESTGUID".into());
+        let url = reqwest::Url::parse("https://p28-buy.itunes.apple.com/auth").unwrap();
+        let headers: Vec<header::HeaderValue> = [
+            "session=one; Domain=itunes.apple.com; Path=/; Secure; HttpOnly",
+            "host=two; Path=/private; Secure; Max-Age=3600",
+            "expired=gone; Path=/; Max-Age=0",
+        ]
+        .iter()
+        .map(|v| v.parse().unwrap())
+        .collect();
+        store.cookies.set_cookies(&mut headers.iter(), &url);
+        store.observe_session_response(&url, &header::HeaderMap::new());
+        let restored = Store::with_guid("TESTGUID".into());
+        restored
+            .import_session_cookies(&store.export_session_cookies().unwrap())
+            .unwrap();
+        assert!(
+            cookie_header(&restored, "https://p28-buy.itunes.apple.com/private/item")
+                .contains("host=two")
+        );
+        assert!(
+            !cookie_header(&restored, "https://p28-buy.itunes.apple.com/privateer")
+                .contains("host=two")
+        );
+        assert!(
+            !cookie_header(&restored, "https://p29-buy.itunes.apple.com/private/item")
+                .contains("host=two")
+        );
+        assert!(
+            cookie_header(&restored, "https://p29-buy.itunes.apple.com/").contains("session=one")
+        );
+        assert!(
+            cookie_header(&restored, "http://p28-buy.itunes.apple.com/private/item").is_empty()
+        );
+        assert!(cookie_header(&restored, "https://evil.example/").is_empty());
+        assert!(!restored
+            .export_session_cookies()
+            .unwrap()
+            .contains("expired"));
+        assert_eq!(restored.session_pod().as_deref(), Some("28"));
+        let snapshot: Value =
+            serde_json::from_str(&restored.export_session_cookies().unwrap()).unwrap();
+        assert!(snapshot["cookies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["raw_cookie"].as_str().unwrap_or("").contains("HttpOnly")));
+    }
+
+    #[test]
+    fn session_import_is_atomic_and_legacy_empty_is_supported() {
+        let store = Store::new();
+        store.import_session_cookies("").unwrap();
+        store.import_session_cookies("{}").unwrap();
+        store
+            .import_session_cookies(r#"{"pod":"28","cookies":[]}"#)
+            .unwrap();
+        let before = store.export_session_cookies().unwrap();
+        for bad in [
+            "not-json",
+            r#"{"pod":"28.evil.example","cookies":[]}"#,
+            r#"{"pod":"29","cookies":[{}]}"#,
+        ] {
+            assert!(store.import_session_cookies(bad).is_err());
+            assert_eq!(store.export_session_cookies().unwrap(), before);
+        }
+        let old: AuthInfo = serde_json::from_str(r#"{"ds_person_id":"123","password_token":"test","display_name":null,"email":null,"region":"US"}"#).unwrap();
+        assert_eq!(old.region.as_deref(), Some("US"));
+    }
+
+    #[test]
+    fn pod_endpoint_tracks_headers_hosts_and_clones_without_accepting_untrusted_hosts() {
+        let store = Store::with_guid("ABCD".into());
+        assert_eq!(
+            store.store_endpoint("buyProduct"),
+            "https://p25-buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/buyProduct?guid=ABCD"
+        );
+        let clone = store.clone();
+        let mut headers = header::HeaderMap::new();
+        headers.insert("pod", "49".parse().unwrap());
+        store.observe_session_response(
+            &reqwest::Url::parse(DEFAULT_AUTH_ENDPOINT).unwrap(),
+            &headers,
+        );
+        assert!(clone
+            .store_endpoint("volumeStoreDownloadProduct")
+            .contains("p49-buy.itunes.apple.com"));
+        store.observe_session_response(
+            &reqwest::Url::parse("https://p28-buy.itunes.apple.com/redirect").unwrap(),
+            &header::HeaderMap::new(),
+        );
+        assert_eq!(clone.session_pod().as_deref(), Some("28"));
+        headers.insert("pod", "99".parse().unwrap());
+        store.observe_session_response(
+            &reqwest::Url::parse("https://evil.example/").unwrap(),
+            &headers,
+        );
+        assert_eq!(clone.session_pod().as_deref(), Some("28"));
+        store
+            .import_session_cookies(r#"{"pod":"71","cookies":[]}"#)
+            .unwrap();
+        assert_eq!(clone.session_pod().as_deref(), Some("71"));
+    }
+
+    #[test]
+    fn auth_failure_codes_are_exact_not_message_substrings() {
+        for code in [serde_json::json!("2042"), serde_json::json!(2034)] {
+            assert!(is_session_auth_failure(&HashMap::from([(
+                "failureType".into(),
+                code
+            )])));
+        }
+        for code in ["12042", "20420", "1008", "2042 other"] {
+            assert!(!is_session_auth_failure(&HashMap::from([(
+                "failureType".into(),
+                serde_json::json!(code)
+            )])));
+        }
+        assert!(!is_session_auth_failure(&HashMap::from([(
+            "customerMessage".into(),
+            serde_json::json!("2042 Sign In")
+        )])));
+    }
+
+    #[tokio::test]
+    async fn response_cookies_survive_redirect_and_reopen_on_real_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for step in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buf = [0; 2048];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap().to_lowercase();
+                if step > 0 {
+                    assert!(
+                        request.contains("cookie: apple-session=test-only"),
+                        "{request}"
+                    );
+                }
+                let reply = if step == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /store/pod\r\nSet-Cookie: apple-session=test-only; Path=/store; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                };
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let store = Store::new();
+        store
+            .post_store_plist(
+                &format!("http://{address}/auth"),
+                Store::apple_plist_headers(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let restored = Store::with_guid(store.guid.clone());
+        restored
+            .import_session_cookies(&store.export_session_cookies().unwrap())
+            .unwrap();
+        restored
+            .post_store_plist(
+                &format!("http://{address}/store/reopened"),
+                Store::apple_plist_headers(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn import_does_not_revive_expired_cookie_or_extend_absolute_expiry() {
+        use reqwest::cookie::CookieStore;
+        let store = Store::new();
+        let url = reqwest::Url::parse("https://p28-buy.itunes.apple.com/").unwrap();
+        let header = "persistent=test-only; Max-Age=3600; Secure"
+            .parse()
+            .unwrap();
+        store
+            .cookies
+            .set_cookies(&mut std::iter::once(&header), &url);
+        let serialized = store.export_session_cookies().unwrap();
+        let mut snapshot: Value = serde_json::from_str(&serialized).unwrap();
+        let expiration = snapshot["cookies"][0]["expires"].clone();
+        let restored = Store::new();
+        restored.import_session_cookies(&serialized).unwrap();
+        let exported: Value =
+            serde_json::from_str(&restored.export_session_cookies().unwrap()).unwrap();
+        assert_eq!(exported["cookies"][0]["expires"], expiration);
+        snapshot["cookies"][0]["expires"] = serde_json::json!({"AtUtc":"2000-01-01T00:00:00Z"});
+        restored
+            .import_session_cookies(&snapshot.to_string())
+            .unwrap();
+        assert!(cookie_header(&restored, url.as_str()).is_empty());
+    }
+
     #[test]
     fn normalizes_auth_urls_with_trailing_slash() {
         assert_eq!(
@@ -1233,6 +1606,92 @@ mod tests {
             assert!(!is_transient_auth_status(status));
         }
         assert_eq!(retry_after("12"), Some(Duration::from_secs(12)));
+    }
+
+    #[tokio::test]
+    async fn store_post_preserves_body_and_headers_across_pod_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for step in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buf = [0; 2048];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..split]).to_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if bytes.len() >= split + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.starts_with("POST "));
+                assert!(request
+                    .to_lowercase()
+                    .contains("x-apple-store-front: 143441-1,29"));
+                assert!(request.to_lowercase().contains("x-token: test-only"));
+                assert!(request.ends_with("<plist>same-body</plist>"));
+                if step == 0 {
+                    socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: /pod28?Pod=28\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                } else {
+                    assert!(request.starts_with("POST /pod28?Pod=28 "));
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let store = Store::new();
+        let mut headers = Store::apple_plist_headers();
+        headers.insert("X-Apple-Store-Front", "143441-1,29".parse().unwrap());
+        headers.insert("X-Token", "test-only".parse().unwrap());
+        let response = store
+            .post_store_plist(
+                &format!("http://{address}/pod25"),
+                headers,
+                b"<plist>same-body</plist>".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "OK");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn store_post_rejects_untrusted_redirect_and_http_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (reply, expected) in [
+            ("HTTP/1.1 302 Found\r\nLocation: https://evil.example/steal\r\nContent-Length: 0\r\n\r\n", "不可信"),
+            ("HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n", "Location"),
+            ("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n", "503"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                socket.read(&mut buffer).await.unwrap();
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            });
+            let error = Store::new().post_store_plist(&format!("http://{address}/store"), Store::apple_plist_headers(), vec![]).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            task.await.unwrap();
+        }
     }
 
     #[test]

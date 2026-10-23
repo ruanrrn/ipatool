@@ -9,6 +9,151 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod purchase_tests {
+    use super::*;
+    use crate::apple_auth::AuthInfo;
+    use std::collections::HashMap;
+
+    #[derive(Clone)]
+    struct Authorization {
+        success: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AppleAuthService for Authorization {
+        async fn download_product(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &AuthInfo,
+        ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(HashMap::from([(
+                "_state".into(),
+                Value::String(if self.success { "success" } else { "failure" }.into()),
+            )]))
+        }
+        async fn ensure_license(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &AuthInfo,
+        ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+            panic!("batch downloads must not auto-purchase")
+        }
+    }
+
+    #[tokio::test]
+    async fn apple_authorization_is_persisted_even_if_later_payload_processing_fails() {
+        let db = Arc::new(Mutex::new(Database::new(":memory:").unwrap()));
+        let store = PurchaseRecordingStore {
+            store: &Authorization { success: true },
+            db: &db,
+            account_email: " USER@Example.com ",
+        };
+        let params = DownloadParams {
+            store: &store,
+            email: "USER@Example.com",
+            appid: "123",
+            app_ver_id: None,
+            download_path: ".",
+            auto_purchase: false,
+            token: None,
+            progress_callback: None,
+        };
+        assert!(download_ipa_with_account(params).await.is_err()); // no songList
+        assert!(db
+            .lock()
+            .unwrap()
+            .is_purchased("user@example.com", "123")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_apple_authorization_does_not_record_ownership() {
+        let db = Arc::new(Mutex::new(Database::new(":memory:").unwrap()));
+        let store = PurchaseRecordingStore {
+            store: &Authorization { success: false },
+            db: &db,
+            account_email: "user@example.com",
+        };
+        let auth = AuthInfo {
+            ds_person_id: None,
+            password_token: None,
+            display_name: None,
+            email: None,
+            region: None,
+        };
+        store.download_product("123", None, &auth).await.unwrap();
+        assert!(!db
+            .lock()
+            .unwrap()
+            .is_purchased("user@example.com", "123")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn authorization_persistence_errors_are_returned() {
+        let db = Arc::new(Mutex::new(Database::new(":memory:").unwrap()));
+        // Invalid ownership identity must propagate rather than silently succeed.
+        let store = PurchaseRecordingStore {
+            store: &Authorization { success: true },
+            db: &db,
+            account_email: "手动上传",
+        };
+        let auth = AuthInfo {
+            ds_person_id: None,
+            password_token: None,
+            display_name: None,
+            email: None,
+            region: None,
+        };
+        assert!(store.download_product("123", None, &auth).await.is_err());
+    }
+}
+
+#[derive(Clone)]
+struct PurchaseRecordingStore<'a, S> {
+    store: &'a S,
+    db: &'a Arc<Mutex<Database>>,
+    account_email: &'a str,
+}
+
+#[async_trait::async_trait]
+impl<S: AppleAuthService + Sync> AppleAuthService for PurchaseRecordingStore<'_, S> {
+    async fn download_product(
+        &self,
+        app_identifier: &str,
+        app_ver_id: Option<&str>,
+        auth_info: &crate::apple_auth::AuthInfo,
+    ) -> Result<std::collections::HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        let response = self
+            .store
+            .download_product(app_identifier, app_ver_id, auth_info)
+            .await?;
+        if response.get("_state").and_then(Value::as_str) == Some("success") {
+            self.db
+                .lock()
+                .map_err(|_| std::io::Error::other("purchase database lock poisoned"))?
+                .record_purchase(self.account_email, app_identifier, "apple_download")?;
+        }
+        Ok(response)
+    }
+
+    async fn ensure_license(
+        &self,
+        app_identifier: &str,
+        app_ver_id: Option<&str>,
+        auth_info: &crate::apple_auth::AuthInfo,
+    ) -> Result<std::collections::HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        self.store
+            .ensure_license(app_identifier, app_ver_id, auth_info)
+            .await
+    }
+}
+
 pub struct DownloadManager {
     db: Arc<Mutex<Database>>,
     client: Client,
@@ -158,9 +303,14 @@ impl DownloadManager {
         loop {
             let _start_time = Instant::now();
 
+            let recording_store = PurchaseRecordingStore {
+                store,
+                db,
+                account_email,
+            };
             match Self::download_with_resume(
                 downloads_dir,
-                store,
+                &recording_store,
                 app_id,
                 version,
                 account_email,
@@ -169,6 +319,12 @@ impl DownloadManager {
             .await
             {
                 Ok(result) => {
+                    if !result.ok {
+                        return Err(result
+                            .error
+                            .unwrap_or_else(|| "Apple download authorization failed".into())
+                            .into());
+                    }
                     // 记录成功下载
                     if let Some(ref file_path) = result.file {
                         let file_meta = std::fs::metadata(file_path).ok();
@@ -215,7 +371,7 @@ impl DownloadManager {
                             delisted: None,
                             created_at: None,
                         };
-                        let _ = db.lock().unwrap().add_download_record(&record);
+                        db.lock().unwrap().add_download_record(&record)?;
                     }
 
                     // Inspect IPA and persist delivery decision so the first poll

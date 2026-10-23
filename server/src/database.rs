@@ -401,6 +401,9 @@ impl Database {
             let _ = conn.execute("ALTER TABLE accounts ADD COLUMN auth_session TEXT", []);
         }
 
+        // Preserve legacy token ownership while every old account/token is still available.
+        Self::migrate_purchase_records(conn)?;
+
         // 账号唯一性：按 email 收口，只保留最新一条，避免 token 变了后产生重复账号。
         let _ = conn.execute(
             "DELETE FROM accounts
@@ -577,6 +580,109 @@ impl Database {
         );
 
         Ok(())
+    }
+
+    /// Stable ownership identity; session tokens are never purchase identities.
+    pub fn purchase_account_key(email: &str) -> Result<String> {
+        let key = email.trim().to_lowercase();
+        let mut parts = key.split('@');
+        let local = parts.next().unwrap_or_default();
+        let domain = parts.next().unwrap_or_default();
+        if local.is_empty()
+            || domain.is_empty()
+            || parts.next().is_some()
+            || key.chars().any(char::is_whitespace)
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "purchase account must be an email".into(),
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Run before account deduplication or token replacement. Unresolvable legacy
+    /// rows remain untouched: a token prefix is evidence only when it has exactly
+    /// one valid normalized owner across ALL matching accounts.
+    fn migrate_purchase_keys(conn: &Connection) -> Result<()> {
+        use std::collections::{HashMap, HashSet};
+        let mut owners: HashMap<String, HashSet<Option<String>>> = HashMap::new();
+        let mut stmt = conn.prepare("SELECT token, email FROM accounts")?;
+        let accounts =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for account in accounts {
+            let (token, email) = account?;
+            if token.is_empty() {
+                continue;
+            }
+            let legacy = format!("tok_{}", token.chars().take(16).collect::<String>());
+            owners
+                .entry(legacy)
+                .or_default()
+                .insert(Self::purchase_account_key(&email).ok());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, adam_id, source, created_at FROM purchase_records ORDER BY id",
+        )?;
+        let records = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        for (id, key, app, source, created_at) in records {
+            let target = if let Ok(email) = Self::purchase_account_key(&key) {
+                Some(email)
+            } else if key.starts_with("tok_") {
+                owners
+                    .get(&key)
+                    .filter(|set| set.len() == 1)
+                    .and_then(|set| set.iter().next())
+                    .and_then(|email| email.clone())
+            } else {
+                None
+            };
+            if let Some(target) = target.filter(|target| target != &key) {
+                // Preserve an existing canonical row's provenance on conflicts.
+                conn.execute("INSERT INTO purchase_records(account_id, adam_id, source, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, adam_id) DO NOTHING", params![target, app, source, created_at])?;
+                conn.execute("DELETE FROM purchase_records WHERE id = ?", params![id])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn migrate_purchase_records(conn: &Connection) -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        Self::migrate_purchase_keys(&tx)?;
+        // Both manual uploads and filesystem discovery create completed records,
+        // but use sentinel account names (手动上传/未知账号). Only real account
+        // emails plus numeric Apple adam IDs are historical ownership evidence.
+        let mut stmt = tx.prepare("SELECT account_email, app_id, COALESCE(download_date, CURRENT_TIMESTAMP) FROM download_records WHERE status = 'completed'")?;
+        let history = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        drop(stmt);
+        for (email, app, date) in history {
+            if let Ok(key) = Self::purchase_account_key(&email) {
+                if !app.is_empty()
+                    && app.bytes().all(|b| b.is_ascii_digit())
+                    && app.bytes().any(|b| b != b'0')
+                {
+                    tx.execute("INSERT INTO purchase_records(account_id, adam_id, source, created_at) VALUES (?, ?, 'download_history', ?) ON CONFLICT(account_id, adam_id) DO NOTHING", params![key, app, date])?;
+                }
+            }
+        }
+        tx.commit()
     }
 
     pub fn hash_password(password: &str) -> String {
@@ -988,7 +1094,9 @@ impl Database {
 
     pub fn save_account(&self, account: &Account) -> Result<()> {
         let conn = self.connection.lock().unwrap();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        Self::migrate_purchase_keys(&tx)?;
+        tx.execute(
             "INSERT INTO accounts (token, email, region, guid, cookie_user, cookies)
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(email) DO UPDATE SET
@@ -1007,16 +1115,19 @@ impl Database {
                 account.cookies,
             ],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     /// 保存加密后的 Apple 登录态（JSON 字符串），按 token 定位账号。
     pub fn update_account_session(&self, token: &str, auth_session: &str) -> Result<()> {
         let conn = self.connection.lock().unwrap();
-        conn.execute(
+        let updated = conn.execute(
             "UPDATE accounts SET auth_session = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?",
             params![auth_session, token],
         )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 
@@ -1779,11 +1890,12 @@ impl Database {
 
     // ===== Purchase Records =====
 
-    /// Record that an app is owned by an account (INSERT OR IGNORE - idempotent)
+    /// Record account ownership; ignore only duplicate (email, app) conflicts.
     pub fn record_purchase(&self, account_id: &str, adam_id: &str, source: &str) -> Result<()> {
+        let account_id = Self::purchase_account_key(account_id)?;
         let conn = self.connection.lock().unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO purchase_records (account_id, adam_id, source) VALUES (?, ?, ?)",
+            "INSERT INTO purchase_records (account_id, adam_id, source) VALUES (?, ?, ?) ON CONFLICT(account_id, adam_id) DO NOTHING",
             params![account_id, adam_id, source],
         )?;
         Ok(())
@@ -1791,6 +1903,7 @@ impl Database {
 
     /// Check if a specific app is owned by an account
     pub fn is_purchased(&self, account_id: &str, adam_id: &str) -> Result<bool> {
+        let account_id = Self::purchase_account_key(account_id)?;
         let conn = self.connection.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM purchase_records WHERE account_id = ? AND adam_id = ?",
@@ -1802,6 +1915,7 @@ impl Database {
 
     /// Get all purchased adam_ids for an account
     pub fn get_purchased_app_ids(&self, account_id: &str) -> Result<Vec<String>> {
+        let account_id = Self::purchase_account_key(account_id)?;
         let conn = self.connection.lock().unwrap();
         let mut stmt = conn.prepare("SELECT adam_id FROM purchase_records WHERE account_id = ?")?;
         let rows = stmt.query_map(params![account_id], |row| row.get(0))?;
@@ -1818,6 +1932,7 @@ impl Database {
         account_id: &str,
         adam_ids: &[String],
     ) -> Result<std::collections::HashSet<String>> {
+        let account_id = Self::purchase_account_key(account_id)?;
         if adam_ids.is_empty() {
             return Ok(std::collections::HashSet::new());
         }
@@ -1939,6 +2054,218 @@ mod tests {
             delisted: None,
             created_at: None,
         }
+    }
+
+    fn purchase_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        Database::create_tables(&conn).unwrap();
+        Database {
+            connection: std::sync::Mutex::new(conn),
+        }
+    }
+
+    fn insert_purchase(db: &Database, key: &str, app: &str, source: &str) {
+        db.connection.lock().unwrap().execute(
+            "INSERT INTO purchase_records(account_id, adam_id, source, created_at) VALUES (?, ?, ?, '2020-01-01')",
+            params![key, app, source],
+        ).unwrap();
+    }
+
+    #[test]
+    fn purchase_migration_precedes_account_dedup_and_is_idempotent() {
+        let db = purchase_db();
+        {
+            let conn = db.connection.lock().unwrap();
+            conn.execute("INSERT INTO accounts(token,email) VALUES ('old-token-123456789', ' User@Example.com '), ('new-token-123456789', ' User@Example.com ')", []).unwrap();
+        }
+        insert_purchase(&db, "tok_old-token-123456", "123", "claim");
+        insert_purchase(&db, "user@example.com", "123", "apple_api");
+        insert_purchase(&db, " User@Example.com ", "456", "claim");
+        for _ in 0..2 {
+            Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+            assert_eq!(
+                db.get_purchased_app_ids("user@example.com").unwrap().len(),
+                2
+            );
+        }
+        let conn = db.connection.lock().unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM purchase_records", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        let source: String = conn.query_row("SELECT source FROM purchase_records WHERE account_id='user@example.com' AND adam_id='123'", [], |r| r.get(0)).unwrap();
+        assert_eq!(source, "apple_api");
+    }
+
+    #[test]
+    fn purchase_migration_preserves_ambiguous_and_orphan_token_keys() {
+        let db = purchase_db();
+        {
+            let conn = db.connection.lock().unwrap();
+            conn.execute("INSERT INTO accounts(token,email) VALUES ('shared-prefix-123-A', 'a@example.com'), ('shared-prefix-123-B', 'b@example.com')", []).unwrap();
+        }
+        insert_purchase(&db, "tok_shared-prefix-12", "123", "claim");
+        insert_purchase(&db, "tok_missing-token-12", "456", "claim");
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        assert!(db
+            .get_purchased_app_ids("a@example.com")
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .get_purchased_app_ids("b@example.com")
+            .unwrap()
+            .is_empty());
+        let conn = db.connection.lock().unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purchase_records WHERE account_id LIKE 'tok_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn purchase_migration_backfills_only_valid_completed_apple_history() {
+        let db = purchase_db();
+        {
+            let conn = db.connection.lock().unwrap();
+            for (email, app, status) in [
+                (" User@Example.com ", "123", "completed"),
+                ("user@example.com", "456", "failed"),
+                ("手动上传", "789", "completed"),
+                ("未知账号", "987", "completed"),
+                ("user@example.com", "upload-123", "completed"),
+                ("user@example.com", "", "completed"),
+                ("", "321", "completed"),
+            ] {
+                conn.execute("INSERT INTO download_records(app_name,app_id,account_email,status) VALUES ('App',?,?,?)", params![app,email,status]).unwrap();
+            }
+            Database::migrate_tables(&conn).unwrap();
+            Database::migrate_tables(&conn).unwrap();
+        }
+        assert_eq!(
+            db.get_purchased_app_ids("user@example.com").unwrap(),
+            vec!["123"]
+        );
+    }
+
+    #[test]
+    fn account_session_update_requires_an_existing_account() {
+        let db = purchase_db();
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        assert!(db
+            .update_account_session("missing-token", "encrypted")
+            .is_err());
+    }
+
+    #[test]
+    fn purchase_apis_use_canonical_email_keys() {
+        let db = purchase_db();
+        db.record_purchase(" User@Example.com ", "123", "claim")
+            .unwrap();
+        db.record_purchase("USER@EXAMPLE.COM", "123", "apple_api")
+            .unwrap();
+        assert!(db.is_purchased("user@example.com", "123").unwrap());
+        assert_eq!(
+            db.get_purchased_app_ids(" USER@example.com ").unwrap(),
+            vec!["123"]
+        );
+        assert!(db
+            .batch_check_purchased("USER@example.com", &["123".into(), "456".into()])
+            .unwrap()
+            .contains("123"));
+        assert!(db
+            .record_purchase("tok_not-an-email", "123", "claim")
+            .is_err());
+    }
+
+    #[test]
+    fn purchase_migration_rolls_back_and_surfaces_write_errors() {
+        let db = purchase_db();
+        insert_purchase(&db, " First@Example.com ", "123", "claim");
+        insert_purchase(&db, " Second@Example.com ", "456", "claim");
+        let conn = db.connection.lock().unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_purchase BEFORE INSERT ON purchase_records WHEN NEW.account_id='second@example.com' BEGIN SELECT RAISE(ABORT, 'test write failure'); END;").unwrap();
+        assert!(Database::migrate_tables(&conn).is_err());
+        let unchanged: i64 = conn.query_row("SELECT COUNT(*) FROM purchase_records WHERE account_id IN (' First@Example.com ', ' Second@Example.com ')", [], |r| r.get(0)).unwrap();
+        assert_eq!(unchanged, 2);
+    }
+
+    #[test]
+    fn purchase_token_prefix_collisions_for_same_normalized_owner_are_safe() {
+        let db = purchase_db();
+        {
+            let conn = db.connection.lock().unwrap();
+            conn.execute("INSERT INTO accounts(token,email) VALUES ('shared-prefix-123-A', ' User@Example.com '), ('shared-prefix-123-B', 'user@example.com')", []).unwrap();
+        }
+        insert_purchase(&db, "tok_shared-prefix-12", "123", "claim");
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        assert!(db.is_purchased("user@example.com", "123").unwrap());
+    }
+
+    #[test]
+    fn purchase_valid_email_with_tok_prefix_is_still_canonicalized() {
+        let db = purchase_db();
+        insert_purchase(&db, "tok_User@Example.com", "123", "claim");
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        assert!(db.is_purchased("tok_user@example.com", "123").unwrap());
+    }
+
+    #[test]
+    fn purchase_write_failure_prevents_account_token_replacement() {
+        let db = purchase_db();
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        let mut account = Account {
+            id: None,
+            token: "old-token-123456789".into(),
+            email: "user@example.com".into(),
+            region: "US".into(),
+            guid: None,
+            cookie_user: None,
+            cookies: None,
+            created_at: None,
+            updated_at: None,
+        };
+        db.save_account(&account).unwrap();
+        insert_purchase(&db, "tok_old-token-123456", "123", "claim");
+        db.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_purchase BEFORE INSERT ON purchase_records BEGIN SELECT RAISE(ABORT, 'test write failure'); END;").unwrap();
+        account.token = "new-token-123456789".into();
+        assert!(db.save_account(&account).is_err());
+        assert!(db
+            .record_purchase("user@example.com", "456", "claim")
+            .is_err());
+        assert!(db
+            .get_account_by_token("old-token-123456789")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn purchase_relogin_migrates_old_token_before_overwrite() {
+        let db = purchase_db();
+        Database::migrate_tables(&db.connection.lock().unwrap()).unwrap();
+        let mut account = Account {
+            id: None,
+            token: "old-token-123456789".into(),
+            email: "User@Example.com".into(),
+            region: "US".into(),
+            guid: None,
+            cookie_user: None,
+            cookies: None,
+            created_at: None,
+            updated_at: None,
+        };
+        db.save_account(&account).unwrap();
+        insert_purchase(&db, "tok_old-token-123456", "123", "claim");
+        account.token = "new-token-123456789".into();
+        db.save_account(&account).unwrap();
+        assert!(db.is_purchased("user@example.com", "123").unwrap());
+        assert!(db
+            .get_account_by_token("old-token-123456789")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

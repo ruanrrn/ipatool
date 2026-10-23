@@ -5,7 +5,7 @@ import { apiFetch } from '../utils/api.js'
 
 /**
  * 进程内搜索结果缓存。
- * key = `${region}:${normalizedQuery}`，value = { results, purchaseMap, ts }。
+ * key = `${region}:${normalizedQuery}`，value = { results, ts }。
  * TTL 内重复搜索直接返回缓存，避免重复请求 iTunes Search API。
  */
 const SEARCH_CACHE_TTL_MS = 60_000 // 1 分钟
@@ -94,6 +94,7 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
     }
 
     const requestId = ++currentSearchRequestId.value
+    searchResultPurchaseStatusMap.value = {}
     searching.value = true
     try {
       // Get current account's region
@@ -101,17 +102,14 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
       const region = account?.region || 'US'
       const cacheKey = searchCacheKey(region, query)
       let nextResults = []
-      let cached = false
 
       // 缓存命中：TTL 内直接复用，跳过网络请求
       const cachedEntry = _searchCache.get(cacheKey)
       const now = Date.now()
       if (cachedEntry && now - cachedEntry.ts < SEARCH_CACHE_TTL_MS) {
         nextResults = cachedEntry.results
-        cached = true
         if (requestId !== currentSearchRequestId.value) return
         searchResults.value = nextResults
-        searchResultPurchaseStatusMap.value = { ...cachedEntry.purchaseMap }
       } else {
         // Check if it's a numeric App ID
         if (/^\d+$/.test(query)) {
@@ -133,13 +131,11 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
         }
 
         searchResults.value = nextResults
-        await refreshSearchResultsPurchaseStatus(nextResults, account?.token, requestId)
 
-        // 写入缓存（快照当前 results + purchaseMap）
+        // 仅缓存公共元数据，购买状态必须按当前账号重新检测。
         if (nextResults.length > 0) {
           _searchCache.set(cacheKey, {
             results: nextResults,
-            purchaseMap: { ...searchResultPurchaseStatusMap.value },
             ts: Date.now(),
           })
           // LRU 淘汰
@@ -149,6 +145,9 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
           }
         }
       }
+
+      await refreshSearchResultsPurchaseStatus(nextResults, account?.token, requestId)
+      if (requestId !== currentSearchRequestId.value) return
 
       // 记录搜索历史（去重，移到最前；仅在文字搜索且有结果时）
       if (!/^\d+$/.test(query) && nextResults.length > 0) {
@@ -161,10 +160,6 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
         }
       }
 
-      // 缓存命中时跳过 purchase 刷新（已随快照恢复）
-      if (!cached) {
-        // purchase 已在上方刷新
-      }
     } catch (error) {
       console.error('Search failed:', error)
       if (requestId === currentSearchRequestId.value) {
@@ -212,6 +207,9 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
 
   // Refresh purchase status for search results
   const refreshSearchResultsPurchaseStatus = async (results, token, requestId = currentSearchRequestId.value) => {
+    const accountIndex = selectedAccount.value
+    const isCurrent = () => requestId === currentSearchRequestId.value &&
+      selectedAccount.value === accountIndex && accounts.value[accountIndex]?.token === token
     if (!Array.isArray(results) || results.length === 0 || !token) {
       if (requestId === currentSearchRequestId.value) {
         searchResultPurchaseStatusMap.value = {}
@@ -228,25 +226,26 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
     }
 
     try {
-      const { data } = await apiFetch(`${API_BASE}/purchase-status-batch`, {
+      const { response, data } = await apiFetch(`${API_BASE}/purchase-status-batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ token, appids })
       })
-      if (requestId !== currentSearchRequestId.value) return
+      if (!isCurrent()) return
 
-      if (data?.ok && data?.data?.results) {
+      if (response?.ok !== false && data?.ok && data?.data?.results) {
         const batchResults = data.data.results
         const newEntries = {}
         for (const appid of appids) {
           const payload = batchResults[appid]
           if (payload) {
+            const error = payload.error || (payload.status === 'error' ? '检测失败' : null)
             newEntries[appid] = {
-              purchased: !!payload.purchased,
-              needsPurchase: !!payload.needsPurchase,
-              status: payload.status || 'unknown',
-              error: payload.error || null
+              purchased: !error && !!payload.purchased,
+              needsPurchase: !error && !!payload.needsPurchase,
+              status: error ? 'error' : payload.status || 'unknown',
+              error
             }
           } else {
             newEntries[appid] = {
@@ -278,7 +277,7 @@ export function useSearch(accounts, selectedAccount, onAppSelected, options = {}
         }
       }
     } catch (error) {
-      if (requestId !== currentSearchRequestId.value) return
+      if (!isCurrent()) return
       const errorEntries = {}
       for (const appid of appids) {
         errorEntries[appid] = {

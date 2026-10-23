@@ -1,3 +1,5 @@
+use account_recovery::RecoveryStore;
+mod account_recovery;
 use actix_files as fs;
 use actix_multipart::Multipart;
 use actix_web::{
@@ -168,6 +170,55 @@ const COMMUNITY_ARCHIVE_CACHE_TTL_SECS: u64 = 300; // 5 minutes
 const STORE_STATUS_CACHE_TTL_SECS: u64 = 3600; // 1 hour
 const LOCAL_DELISTED_CANDIDATES_CACHE_TTL_SECS: u64 = 60; // 1 minute
 
+fn canonical_purchase_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+fn purchase_requires_login(error: &str) -> bool {
+    let lowered = error.to_lowercase();
+    lowered.contains("2042")
+        || lowered.contains("sign in to the itunes store")
+        || error.contains("登录到 iTunes Store")
+}
+
+fn purchase_required(error: &str) -> bool {
+    let lowered = error.to_lowercase();
+    if lowered.contains("storefront")
+        || lowered.contains("region")
+        || lowered.contains("sign in")
+        || lowered.contains("2042")
+        || error.contains("地区")
+        || error.contains("登录")
+    {
+        return false;
+    }
+    lowered.contains("license not found")
+        || lowered.contains("not purchased")
+        || lowered.contains("not owned")
+        || error.contains("未购买")
+        || error.contains("未领取")
+}
+
+fn purchase_failure_error(error: &str) -> Option<String> {
+    (!purchase_required(error)).then(|| error.to_string())
+}
+
+fn purchase_database_error(error: impl std::fmt::Display) -> HttpResponse {
+    HttpResponse::InternalServerError().json(ApiResponse::<String>::error(format!(
+        "购买记录数据库错误: {}",
+        error
+    )))
+}
+
+fn persist_purchase(data: &AppState, email: &str, appid: &str, source: &str) -> Result<(), String> {
+    let db = data
+        .db
+        .lock()
+        .map_err(|error| format!("数据库锁错误: {}", error))?;
+    db.record_purchase(&canonical_purchase_email(email), appid, source)
+        .map_err(|error| error.to_string())
+}
+
 fn evict_expired_purchase_cache_locked(
     cache: &mut std::collections::HashMap<(String, String), PurchaseCacheEntry>,
 ) {
@@ -203,6 +254,8 @@ struct PersistedAccountSession {
     auth_info: ipa_webtool_services::AuthInfo,
     #[serde(default)]
     authenticated_at: i64,
+    #[serde(default)]
+    session_cookies: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -213,31 +266,29 @@ struct EncryptedAccountSession {
 }
 
 /// 将账号当前登录态加密写入 DB，保证服务重启后无需重新登录。
-fn persist_account_session(db: &Database, token: &str, store: &AccountStore) {
-    let Some(auth_info) = store.auth_info.clone() else {
-        return;
-    };
-    let result = (|| -> Result<(), String> {
-        let payload = serde_json::to_string(&PersistedAccountSession {
-            guid: store.store.guid.clone(),
-            auth_info,
-            authenticated_at: store.authenticated_at,
-        })
+fn persist_account_session(db: &Database, token: &str, store: &AccountStore) -> Result<(), String> {
+    let auth_info = store.auth_info.clone().ok_or("账号尚未认证")?;
+    let payload = serde_json::to_string(&PersistedAccountSession {
+        guid: store.store.guid.clone(),
+        auth_info,
+        authenticated_at: store.authenticated_at,
+        session_cookies: store.store.export_session_cookies()?,
+    })
+    .map_err(|e| e.to_string())?;
+    let enc_key = ipa_webtool_services::crypto::ensure_encryption_key(db)?;
+    let (ct, iv, tag) = ipa_webtool_services::crypto::encrypt(&payload, &enc_key)?;
+    let blob = serde_json::to_string(&EncryptedAccountSession { ct, iv, tag })
         .map_err(|e| e.to_string())?;
-        let enc_key = ipa_webtool_services::crypto::ensure_encryption_key(db)?;
-        let (ct, iv, tag) = ipa_webtool_services::crypto::encrypt(&payload, &enc_key)?;
-        let blob = serde_json::to_string(&EncryptedAccountSession { ct, iv, tag })
-            .map_err(|e| e.to_string())?;
-        db.update_account_session(token, &blob)
-            .map_err(|e| e.to_string())
-    })();
-    if let Err(e) = result {
-        log::error!(
-            "[account-session] persist failed for {}: {}",
-            store.account_email,
-            e
-        );
+    // update_account_session currently accepts zero affected rows; reject stale/deleted tokens.
+    if db
+        .get_account_by_token(token)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err("账号已删除或登录会话已替换".into());
     }
+    db.update_account_session(token, &blob)
+        .map_err(|e| e.to_string())
 }
 
 /// 启动时从 DB 恢复已登录的 Apple 账号到内存。
@@ -276,15 +327,25 @@ async fn restore_account_sessions(db_arc: &Arc<Mutex<Database>>) {
                             .map_err(|e| e.to_string())
                     });
                 match session {
-                    Ok(session) => Some((
-                        token,
-                        AccountStore::restore(
+                    Ok(session) => {
+                        let store = AccountStore::restore(
                             &email,
                             session.guid,
                             session.auth_info,
                             session.authenticated_at,
-                        ),
-                    )),
+                        );
+                        match store.store.import_session_cookies(&session.session_cookies) {
+                            Ok(()) => Some((token, store)),
+                            Err(error) => {
+                                log::warn!(
+                                    "[account-session] invalid cookie state for {}: {}",
+                                    email,
+                                    error
+                                );
+                                None
+                            }
+                        }
+                    }
                     Err(e) => {
                         log::warn!("[account-session] skip {}: {}", email, e);
                         None
@@ -1648,6 +1709,191 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    pub(super) async fn purchase_test_state(label: &str) -> (web::Data<AppState>, String, String) {
+        let token = format!("purchase-{label}-{}", uuid::Uuid::new_v4());
+        let email = format!("{token}@example.com");
+        ACCOUNTS
+            .write()
+            .await
+            .insert(token.clone(), AccountStore::new(&email));
+        let db = Arc::new(Mutex::new(Database::new(":memory:").unwrap()));
+        db.lock()
+            .unwrap()
+            .save_account(&ipa_webtool_services::Account {
+                id: None,
+                token: token.clone(),
+                email: email.clone(),
+                region: "US".into(),
+                guid: None,
+                cookie_user: None,
+                cookies: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .unwrap();
+        let downloads_dir = PathBuf::from(
+            std::env::var("TMPDIR").unwrap_or_else(|_| "/root/.hermes/cache/scratch".into()),
+        );
+        let state = web::Data::new(AppState {
+            download_manager: Arc::new(DownloadManager::new(db.clone(), downloads_dir.clone())),
+            db,
+            downloads_dir,
+            job_store: JobStore::new(),
+            login_rate_limiter: Arc::new(Mutex::new(LoginRateLimiter::new())),
+        });
+        (state, token, email)
+    }
+
+    #[actix_web::test]
+    async fn purchase_cached_failure_survives_single_and_batch_endpoints() {
+        let (state, token, email) = purchase_test_state("cached").await;
+        let error = "This item is not available in your storefront (license lookup failed)";
+        PURCHASE_CACHE.write().await.insert(
+            (email.clone(), "42".into()),
+            PurchaseCacheEntry {
+                purchased: false,
+                needs_purchase: false,
+                error: Some(error.into()),
+                cached_at: Instant::now(),
+            },
+        );
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/single", web::get().to(get_purchase_status))
+                .route("/batch", web::post().to(purchase_status_batch)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri(&format!("/single?token={token}&appid=42"))
+            .to_request();
+        let single: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, request).await;
+        assert_eq!(single["data"]["error"], error);
+        assert_eq!(single["data"]["status"], "unknown");
+        let request = actix_web::test::TestRequest::post()
+            .uri("/batch")
+            .set_json(serde_json::json!({"token": token, "appids": ["42"]}))
+            .to_request();
+        let batch: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, request).await;
+        assert_eq!(batch["data"]["results"]["42"], single["data"]);
+        ACCOUNTS.write().await.remove(&token);
+        PURCHASE_CACHE.write().await.remove(&(email, "42".into()));
+    }
+
+    #[actix_web::test]
+    async fn purchase_owned_email_case_and_whitespace_avoids_upstream() {
+        let (state, token, email) = purchase_test_state("owned").await;
+        state
+            .db
+            .lock()
+            .unwrap()
+            .record_purchase(&email, "42", "test")
+            .unwrap();
+        ACCOUNTS
+            .write()
+            .await
+            .get_mut(&token)
+            .unwrap()
+            .account_email = format!(" {} ", email.to_uppercase());
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/single", web::get().to(get_purchase_status)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri(&format!("/single?token={token}&appid=42"))
+            .to_request();
+        let result: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, request).await;
+        assert_eq!(result["data"]["status"], "owned");
+        ACCOUNTS.write().await.remove(&token);
+    }
+
+    #[actix_web::test]
+    async fn purchase_database_failure_never_becomes_not_owned() {
+        let (state, token, email) = purchase_test_state("db-failure").await;
+        let path = state
+            .downloads_dir
+            .join(format!("purchase-db-{}.sqlite", uuid::Uuid::new_v4()));
+        *state.db.lock().unwrap() = Database::new(path.to_str().unwrap()).unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DROP TABLE purchase_records", [])
+            .unwrap();
+        PURCHASE_CACHE.write().await.insert(
+            (email.clone(), "42".into()),
+            PurchaseCacheEntry {
+                purchased: false,
+                needs_purchase: true,
+                error: Some("license not found".into()),
+                cached_at: Instant::now(),
+            },
+        );
+        assert!(persist_purchase(&state, &email, "42", "test").is_err());
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/single", web::get().to(get_purchase_status))
+                .route("/batch", web::post().to(purchase_status_batch)),
+        )
+        .await;
+        for request in [
+            actix_web::test::TestRequest::get()
+                .uri(&format!("/single?token={token}&appid=42"))
+                .to_request(),
+            actix_web::test::TestRequest::post()
+                .uri("/batch")
+                .set_json(serde_json::json!({"token": token, "appids": ["42"]}))
+                .to_request(),
+        ] {
+            let response = actix_web::test::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+            assert!(body["error"].as_str().unwrap().contains("purchase_records"));
+        }
+        ACCOUNTS.write().await.remove(&token);
+        PURCHASE_CACHE.write().await.remove(&(email, "42".into()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn purchase_known_not_owned_is_not_an_operational_error() {
+        assert_eq!(purchase_failure_error("license not found"), None);
+        assert_eq!(
+            purchase_failure_error("2042: Sign In to the iTunes Store"),
+            Some("2042: Sign In to the iTunes Store".into())
+        );
+    }
+
+    #[test]
+    fn purchase_authentication_failure_explicitly_requires_login() {
+        assert!(purchase_requires_login("2042"));
+        assert!(purchase_requires_login("Sign In to the iTunes Store"));
+        assert!(purchase_requires_login("登录到 iTunes Store。"));
+        assert!(!purchase_requires_login("license not found"));
+    }
+
+    #[test]
+    fn purchase_failure_classification_does_not_guess_from_region_or_license_word() {
+        for error in [
+            "license server unavailable",
+            "item not found in this storefront",
+            "未找到此地区商品",
+            "2042: Sign In to the iTunes Store",
+            "2042: 登录到 iTunes Store。",
+        ] {
+            assert!(!purchase_required(error), "{error}");
+        }
+        assert!(purchase_required("license not found"));
+        assert!(purchase_required("You have not purchased this app"));
+    }
+
     #[test]
     fn test_bcrypt_hash_and_verify() {
         let hash =
@@ -1748,7 +1994,7 @@ mod tests {
                 },
                 1_700_000_000,
             );
-            persist_account_session(&db, &token, &store);
+            persist_account_session(&db, &token, &store).unwrap();
 
             let raw = db.get_account_sessions().unwrap();
             assert!(
@@ -1798,35 +2044,20 @@ async fn start_download_direct(
         Ok(r) => r,
         Err(e) => {
             eprintln!("[start-download-direct] JSON parse error: {}", e);
-            eprintln!(
-                "[start-download-direct] raw body: {}",
-                String::from_utf8_lossy(&body)
-            );
             return HttpResponse::BadRequest()
                 .json(ApiResponse::<String>::error(format!("请求解析失败: {}", e)));
         }
     };
     let accounts = ACCOUNTS.read().await;
-    eprintln!(
-         "[start-download-direct] token={}… appid={} appVerId={:?} autoPurchase={} active_accounts={}",
-         req.token.chars().take(8).collect::<String>(),
-         req.appid,
-         req.appVerId,
-         req.autoPurchase,
-         accounts.len()
-     );
     let account_store = match accounts.get(&req.token) {
         Some(account) => account.clone(),
         None => {
-            eprintln!(
-                "[start-download-direct] token miss: {}…",
-                req.token.chars().take(8).collect::<String>()
-            );
             return HttpResponse::Unauthorized()
                 .json(ApiResponse::<String>::error("无效的 token".to_string()));
         }
     };
     drop(accounts);
+    let account_store = RecoveryStore::new(&req.token, &account_store, &data);
 
     if !req.autoPurchase {
         match account_store
@@ -1848,10 +2079,7 @@ async fn start_download_direct(
                         .unwrap_or("下载失败")
                         .to_string();
 
-                    let is_license_error = error_message.to_lowercase().contains("license")
-                        || error_message.to_lowercase().contains("not found")
-                        || error_message.contains("未购买")
-                        || error_message.contains("未找到");
+                    let is_license_error = purchase_required(&error_message);
 
                     if is_license_error {
                         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -1870,6 +2098,17 @@ async fn start_download_direct(
                     format!("创建任务失败: {}", error),
                 ))
             }
+        }
+    }
+
+    if !req.autoPurchase {
+        if let Err(error) = persist_purchase(
+            &data,
+            &account_store.account_email,
+            &req.appid,
+            "direct_precheck",
+        ) {
+            return purchase_database_error(error);
         }
     }
 
@@ -2015,6 +2254,23 @@ async fn start_download_direct(
 
         match download_ipa_with_account(params).await {
             Ok(result) if result.ok => {
+                let purchase_write = db
+                    .lock()
+                    .map_err(|error| format!("数据库锁错误: {}", error))
+                    .and_then(|db| {
+                        db.record_purchase(
+                            &canonical_purchase_email(&account_email),
+                            &appid,
+                            "direct_download",
+                        )
+                        .map_err(|error| error.to_string())
+                    });
+                if let Err(error) = purchase_write {
+                    job_for_task
+                        .mark_failed(format!("购买记录数据库错误: {}", error))
+                        .await;
+                    return;
+                }
                 if let Some(file_path) = result.file {
                     job_for_task
                         .append_log(format!("[ready] 文件已就绪：{}", file_path))
@@ -2457,27 +2713,20 @@ async fn get_job_info(
 }
 
 // 获取下载链接
-async fn get_download_url(query: web::Query<DownloadUrlQuery>) -> impl Responder {
+async fn get_download_url(
+    query: web::Query<DownloadUrlQuery>,
+    data: web::Data<AppState>,
+) -> impl Responder {
     let accounts = ACCOUNTS.read().await;
-    eprintln!(
-        "[download-url] token={}… appid={} appVerId={:?} active_accounts={}",
-        query.token.chars().take(8).collect::<String>(),
-        query.appid,
-        query.appVerId,
-        accounts.len()
-    );
     let account_store = accounts.get(&query.token);
 
     if account_store.is_none() {
-        eprintln!(
-            "[download-url] token miss: {}…",
-            query.token.chars().take(8).collect::<String>()
-        );
         return HttpResponse::Unauthorized()
             .json(ApiResponse::<String>::error("无效的 token".to_string()));
     }
 
-    let account_store = account_store.unwrap();
+    let account_store = RecoveryStore::new(&query.token, &account_store.unwrap().clone(), &data);
+    drop(accounts);
 
     // 调用 download_product
     match account_store
@@ -2491,6 +2740,14 @@ async fn get_download_url(query: web::Query<DownloadUrlQuery>) -> impl Responder
                 .unwrap_or("failure");
 
             if state == "success" {
+                if let Err(error) = persist_purchase(
+                    &data,
+                    &account_store.account_email,
+                    &query.appid,
+                    "download_url",
+                ) {
+                    return purchase_database_error(error);
+                }
                 // 提取下载链接
                 if let Some(song_list) = result.get("songList").and_then(|sl| sl.as_array()) {
                     if let Some(first_song) = song_list.first() {
@@ -2532,9 +2789,7 @@ async fn get_download_url(query: web::Query<DownloadUrlQuery>) -> impl Responder
                     .and_then(|v| v.as_str())
                     .unwrap_or("下载失败");
 
-                let is_license_error = error_msg.to_lowercase().contains("license")
-                    || error_msg.to_lowercase().contains("not found")
-                    || error_msg.contains("未购买");
+                let is_license_error = purchase_required(error_msg);
 
                 if is_license_error {
                     HttpResponse::BadRequest().json(serde_json::json!({
@@ -2564,6 +2819,8 @@ async fn claim_app(req: web::Json<ClaimRequest>, data: web::Data<AppState>) -> i
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
+    let account_store = RecoveryStore::new(&req.token, &account_store.clone(), &data);
+    drop(accounts);
 
     match account_store
         .ensure_license(&req.appid, req.appVerId.as_deref())
@@ -2600,10 +2857,13 @@ async fn claim_app(req: web::Json<ClaimRequest>, data: web::Data<AppState>) -> i
 
                         if verify_state == "success" {
                             // Record the purchase in DB
-                            let account_id = account_store.account_email.clone();
+                            let account_id = canonical_purchase_email(&account_store.account_email);
                             {
-                                let db = data.db.lock().unwrap_or_else(|e| e.into_inner());
-                                let _ = db.record_purchase(&account_id, &req.appid, "claim");
+                                if let Err(error) =
+                                    persist_purchase(&data, &account_id, &req.appid, "claim")
+                                {
+                                    return purchase_database_error(error);
+                                }
                             }
                             // Update memory cache
                             {
@@ -2614,6 +2874,7 @@ async fn claim_app(req: web::Json<ClaimRequest>, data: web::Data<AppState>) -> i
                                     PurchaseCacheEntry {
                                         purchased: true,
                                         needs_purchase: false,
+                                        error: None,
                                         cached_at: Instant::now(),
                                     },
                                 );
@@ -2684,13 +2945,19 @@ async fn get_purchase_status(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = account_store.account_email.clone();
+    let account_store = RecoveryStore::new(&query.token, &account_store.clone(), &data);
+    drop(accounts);
+    let account_id = canonical_purchase_email(&account_store.account_email);
     let appid = query.appid.clone();
 
     // L1: Check DB for known purchased apps
     {
         let db = data.db.lock().unwrap_or_else(|e| e.into_inner());
-        if let Ok(true) = db.is_purchased(&account_id, &appid) {
+        let purchased = match db.is_purchased(&account_id, &appid) {
+            Ok(purchased) => purchased,
+            Err(error) => return purchase_database_error(error),
+        };
+        if purchased {
             return HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
                 "purchased": true,
                 "needsPurchase": false,
@@ -2709,7 +2976,8 @@ async fn get_purchase_status(
                      "purchased": entry.purchased,
                      "needsPurchase": entry.needs_purchase,
                      "status": if entry.purchased { "owned" } else if entry.needs_purchase { "not_owned" } else { "unknown" },
-                     "error": null,
+                     "error": entry.error,
+                     "requiresLogin": entry.error.as_deref().is_some_and(purchase_requires_login),
                  })));
             }
         }
@@ -2728,8 +2996,8 @@ async fn get_purchase_status(
 
             if state == "success" {
                 // Write to DB (permanent record)
-                if let Ok(db) = data.db.lock() {
-                    let _ = db.record_purchase(&account_id, &appid, "apple_api");
+                if let Err(error) = persist_purchase(&data, &account_id, &appid, "apple_api") {
+                    return purchase_database_error(error);
                 }
                 // Update memory cache
                 {
@@ -2740,6 +3008,7 @@ async fn get_purchase_status(
                         PurchaseCacheEntry {
                             purchased: true,
                             needs_purchase: false,
+                            error: None,
                             cached_at: Instant::now(),
                         },
                     );
@@ -2760,14 +3029,7 @@ async fn get_purchase_status(
                 .unwrap_or("下载失败")
                 .to_string();
 
-            let lowered = error_msg.to_lowercase();
-            let is_license_error = lowered.contains("license")
-                || lowered.contains("not found")
-                || lowered.contains("not purchased")
-                || lowered.contains("not owned")
-                || error_msg.contains("未购买")
-                || error_msg.contains("未领取")
-                || error_msg.contains("未找到");
+            let is_license_error = purchase_required(&error_msg);
 
             // Update memory cache (not purchased, with TTL)
             {
@@ -2778,6 +3040,7 @@ async fn get_purchase_status(
                     PurchaseCacheEntry {
                         purchased: false,
                         needs_purchase: is_license_error,
+                        error: purchase_failure_error(&error_msg),
                         cached_at: Instant::now(),
                     },
                 );
@@ -2787,7 +3050,8 @@ async fn get_purchase_status(
                 "purchased": false,
                 "needsPurchase": is_license_error,
                 "status": if is_license_error { "not_owned" } else { "unknown" },
-                "error": error_msg,
+                "requiresLogin": purchase_requires_login(&error_msg),
+                "error": purchase_failure_error(&error_msg),
             })))
         }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse::<String>::error(format!(
@@ -2810,7 +3074,9 @@ async fn purchase_status_batch(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = account_store.account_email.clone();
+    let account_store = RecoveryStore::new(&req.token, &account_store.clone(), &data);
+    drop(accounts);
+    let account_id = canonical_purchase_email(&account_store.account_email);
 
     if req.appids.is_empty() {
         return HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
@@ -2823,8 +3089,10 @@ async fn purchase_status_batch(
     // L1: Batch check DB
     let db_purchased: std::collections::HashSet<String> = {
         let db = data.db.lock().unwrap_or_else(|e| e.into_inner());
-        db.batch_check_purchased(&account_id, &req.appids)
-            .unwrap_or_default()
+        match db.batch_check_purchased(&account_id, &req.appids) {
+            Ok(purchased) => purchased,
+            Err(error) => return purchase_database_error(error),
+        }
     };
 
     let mut need_check: Vec<String> = Vec::new();
@@ -2862,7 +3130,8 @@ async fn purchase_status_batch(
                          "purchased": entry.purchased,
                          "needsPurchase": entry.needs_purchase,
                          "status": if entry.purchased { "owned" } else if entry.needs_purchase { "not_owned" } else { "unknown" },
-                         "error": null,
+                         "error": entry.error,
+                     "requiresLogin": entry.error.as_deref().is_some_and(purchase_requires_login),
                      }));
                     continue;
                 }
@@ -2904,14 +3173,17 @@ async fn purchase_status_batch(
                         .unwrap_or("failure");
                     if state == "success" {
                         // Write to DB
-                        if let Ok(db) = data.db.lock() {
-                            let _ = db.record_purchase(&account_id, &appid, "apple_api");
+                        if let Err(error) =
+                            persist_purchase(&data, &account_id, &appid, "apple_api")
+                        {
+                            return purchase_database_error(error);
                         }
                         cache.insert(
                             (account_id.clone(), appid.clone()),
                             PurchaseCacheEntry {
                                 purchased: true,
                                 needs_purchase: false,
+                                error: None,
                                 cached_at: Instant::now(),
                             },
                         );
@@ -2932,19 +3204,13 @@ async fn purchase_status_batch(
                             .and_then(|v| v.as_str())
                             .unwrap_or("下载失败")
                             .to_string();
-                        let lowered = error_msg.to_lowercase();
-                        let is_license_error = lowered.contains("license")
-                            || lowered.contains("not found")
-                            || lowered.contains("not purchased")
-                            || lowered.contains("not owned")
-                            || error_msg.contains("未购买")
-                            || error_msg.contains("未领取")
-                            || error_msg.contains("未找到");
+                        let is_license_error = purchase_required(&error_msg);
                         cache.insert(
                             (account_id.clone(), appid.clone()),
                             PurchaseCacheEntry {
                                 purchased: false,
                                 needs_purchase: is_license_error,
+                                error: purchase_failure_error(&error_msg),
                                 cached_at: Instant::now(),
                             },
                         );
@@ -2954,7 +3220,8 @@ async fn purchase_status_batch(
                                 "purchased": false,
                                 "needsPurchase": is_license_error,
                                 "status": if is_license_error { "not_owned" } else { "unknown" },
-                                "error": error_msg,
+                                "requiresLogin": purchase_requires_login(&error_msg),
+                "error": purchase_failure_error(&error_msg),
                             }),
                         );
                     }
@@ -2992,7 +3259,9 @@ async fn confirm_purchase(
                 .json(ApiResponse::<String>::error("无效的 token".to_string()))
         }
     };
-    let account_id = account_store.account_email.clone();
+    let account_store = RecoveryStore::new(&req.token, &account_store.clone(), &data);
+    drop(accounts);
+    let account_id = canonical_purchase_email(&account_store.account_email);
 
     // Force call Apple API - ignore cache TTL
     match account_store.download_product(&req.appid, None).await {
@@ -3005,8 +3274,11 @@ async fn confirm_purchase(
             if state == "success" {
                 // Write to DB (permanent)
                 {
-                    let db = data.db.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = db.record_purchase(&account_id, &req.appid, "paid_confirm");
+                    if let Err(error) =
+                        persist_purchase(&data, &account_id, &req.appid, "paid_confirm")
+                    {
+                        return purchase_database_error(error);
+                    }
                 }
                 // Update memory cache
                 {
@@ -3017,6 +3289,7 @@ async fn confirm_purchase(
                         PurchaseCacheEntry {
                             purchased: true,
                             needs_purchase: false,
+                            error: None,
                             cached_at: Instant::now(),
                         },
                     );
@@ -3038,14 +3311,7 @@ async fn confirm_purchase(
                 .unwrap_or("下载失败")
                 .to_string();
 
-            let lowered = error_msg.to_lowercase();
-            let is_license_error = lowered.contains("license")
-                || lowered.contains("not found")
-                || lowered.contains("not purchased")
-                || lowered.contains("not owned")
-                || error_msg.contains("未购买")
-                || error_msg.contains("未领取")
-                || error_msg.contains("未找到");
+            let is_license_error = purchase_required(&error_msg);
 
             // Update memory cache even for not-purchased result
             {
@@ -3056,6 +3322,7 @@ async fn confirm_purchase(
                     PurchaseCacheEntry {
                         purchased: false,
                         needs_purchase: is_license_error,
+                        error: purchase_failure_error(&error_msg),
                         cached_at: Instant::now(),
                     },
                 );
@@ -3065,7 +3332,8 @@ async fn confirm_purchase(
                 "purchased": false,
                 "needsPurchase": is_license_error,
                 "status": if is_license_error { "not_owned" } else { "unknown" },
-                "error": error_msg,
+                "requiresLogin": purchase_requires_login(&error_msg),
+                "error": purchase_failure_error(&error_msg),
                 "message": "未检测到购买记录，请确认购买已完成",
             })))
         }
@@ -3585,8 +3853,13 @@ async fn apple_login(
                         created_at: None,
                         updated_at: None,
                     };
-                    let _ = db.save_account(&db_account);
-                    persist_account_session(&db, &token, &account_store);
+                    if let Err(error) = db
+                        .save_account(&db_account)
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| persist_account_session(&db, &token, &account_store))
+                    {
+                        return purchase_database_error(error);
+                    }
 
                     // 可选：加密保存凭证
                     if req.save_credentials.unwrap_or(false) {
@@ -4346,7 +4619,7 @@ async fn start_batch_download(
     // 从全局 ACCOUNTS 中按 email 找到已认证的 AccountStore
     let accounts = ACCOUNTS.read().await;
 
-    let mut batch_items: Vec<BatchItem<AccountStore>> = Vec::with_capacity(req.items.len());
+    let mut batch_items: Vec<BatchItem<RecoveryStore>> = Vec::with_capacity(req.items.len());
 
     for item in &req.items {
         let account = accounts
@@ -4372,7 +4645,15 @@ async fn start_batch_download(
         }
 
         batch_items.push(BatchItem {
-            store: account,
+            store: RecoveryStore::new(
+                accounts
+                    .iter()
+                    .find(|(_, acc)| acc.account_email == account.account_email)
+                    .unwrap()
+                    .0,
+                &account,
+                &data,
+            ),
             app_id: item.app_id.clone(),
             app_name: item.app_name.clone(),
             // 这里的 version 实际是 appVerId（external_identifier），用于 download_product 的 app_ver_id 参数
@@ -4385,7 +4666,7 @@ async fn start_batch_download(
 
     match data
         .download_manager
-        .start_batch_download::<AccountStore>(&req.task_name, batch_items)
+        .start_batch_download::<RecoveryStore>(&req.task_name, batch_items)
         .await
     {
         Ok(batch_id) => HttpResponse::Ok().json(ApiResponse::success(serde_json::json!({
