@@ -49,3 +49,8 @@ server/**/*.rs.bk
 *.tmp
 *.temp
 .cache
+
+# Never send local helper binaries or proprietary runtime caches
+scripts/kbsync-helper/bin
+scripts/kbsync-helper/cache
+scripts/kbsync-helper/.cache

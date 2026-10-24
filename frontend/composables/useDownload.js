@@ -182,6 +182,7 @@ export function useDownload(options = {}) {
     if (isStoreMismatchError(err)) {
       return getStoreMismatchMessage(account)
     }
+    if (err) return `检测失败：${err}`
     if (!purchaseRequired.value) return ''
     const price = getSelectedAppPrice()
     if (price !== null && price > 0) return '当前账号未购买：请先在App Store购买应用'
@@ -231,105 +232,82 @@ export function useDownload(options = {}) {
   }
 
   // ===== Purchase Status Functions =====
-  const refreshPurchaseStatus = async (appId, appVerId) => {
-    if (!selectedApp.value?.trackId) {
-      purchaseStatusText.value = '待检测'
-      return
-    }
+  let purchaseRequestId = 0
 
+  const refreshPurchaseStatus = async (appId, appVerId) => {
+    const requestId = ++purchaseRequestId
+    const selectedAppId = selectedApp.value?.trackId
+    const targetAppId = appId || selectedAppId
     const accountIndex = selectedAccount.value
+    const account = accounts.value[accountIndex]
+    const token = account?.token
+    const isCurrent = () => requestId === purchaseRequestId &&
+      selectedApp.value?.trackId === selectedAppId &&
+      selectedAccount.value === accountIndex && accounts.value[accountIndex]?.token === token
+
+    // Never retain an ownership verdict from the previous target or a failed check.
+    purchaseStatus.value = { purchased: null, needsPurchase: false, status: 'unknown', error: null }
+    checkingPurchaseStatus.value = false
+    if (!targetAppId) {
+      purchaseStatusText.value = '待检测'
+      return false
+    }
     if (accountIndex === null || accountIndex === undefined || accountIndex === '') {
       purchaseStatusText.value = '请选择账号后检测'
-      return
+      return false
     }
-
-    const account = accounts.value[accountIndex]
-    if (!account?.token) {
+    if (!token) {
       purchaseStatusText.value = '账号无效'
-      return
+      return false
     }
 
     checkingPurchaseStatus.value = true
+    purchaseStatusText.value = '正在检测购买状态…'
     try {
-      const query = `token=${encodeURIComponent(account.token)}&appid=${encodeURIComponent(selectedApp.value.trackId)}`
+      const query = `token=${encodeURIComponent(token)}&appid=${encodeURIComponent(targetAppId)}`
       const versionParam = appVerId ? `&appVerId=${encodeURIComponent(appVerId)}` : ''
-      const { data } = await apiFetch(`${API_BASE}/purchase-status?${query}${versionParam}`)
+      const { response, data } = await apiFetch(`${API_BASE}/purchase-status?${query}${versionParam}`, {}, { timeout: 240000, retries: 0 })
+      if (!isCurrent()) return false
+      if (response?.ok === false || !data?.ok) throw new Error(data?.error || '检测购买状态失败')
       const payload = data?.data || {}
-
-      if (!data.ok) throw new Error(data.error || '检测失败')
-
+      const error = payload.error || (payload.status === 'error' ? '检测购买状态失败' : null)
       purchaseStatus.value = {
-        purchased: !!payload.purchased,
-        needsPurchase: !!payload.needsPurchase,
-        status: payload.status || 'unknown',
-        error: payload.error || null
+        purchased: error ? null : !!payload.purchased,
+        needsPurchase: !error && !!payload.needsPurchase,
+        status: error ? 'error' : payload.status || 'unknown',
+        error
       }
 
       const price = getSelectedAppPrice()
-      if (payload.purchased) {
+      if (isStoreMismatchError(error)) {
+        purchaseStatusText.value = getStoreMismatchMessage(account)
+      } else if (error) {
+        purchaseStatusText.value = `检测失败：${error}`
+      } else if (payload.purchased) {
         purchaseStatusText.value = price !== null && price > 0 ? '当前账号已购买' : '当前账号已领取'
+        return true
       } else if (payload.needsPurchase) {
         purchaseStatusText.value = price !== null && price > 0 ? '当前账号未购买' : '当前账号未领取'
-      } else if (isStoreMismatchError(payload.error)) {
-        const reg = account?.region ? `（如 ${account.region}）` : ''
-        purchaseStatusText.value = `账号区域${reg}与应用商店不一致`
       } else {
-        purchaseStatusText.value = payload.error ? `检测失败：${payload.error}` : '状态未知'
+        purchaseStatusText.value = '状态未知'
       }
+      return false
     } catch (error) {
-      purchaseStatusText.value = '检测失败'
+      if (!isCurrent()) return false
+      const message = error?.message || '检测购买状态失败'
+      purchaseStatus.value = { purchased: null, needsPurchase: false, status: 'error', error: message }
+      purchaseStatusText.value = isStoreMismatchError(message)
+        ? getStoreMismatchMessage(account) : `检测失败：${message}`
       console.warn('Failed to refresh purchase status:', error)
+      return false
     } finally {
-      checkingPurchaseStatus.value = false
+      if (requestId === purchaseRequestId) checkingPurchaseStatus.value = false
     }
   }
 
-  const preflightPurchaseGate = async (account) => {
-    if (!account?.token || !selectedApp.value?.trackId) return true
-
-    checkingPurchaseStatus.value = true
-    try {
-      const query = `token=${encodeURIComponent(account.token)}&appid=${encodeURIComponent(selectedApp.value.trackId)}`
-      const { data } = await apiFetch(`${API_BASE}/purchase-status?${query}`)
-      const payload = data?.data || {}
-
-      if (!data.ok) {
-        throw new Error(data.error || '检测购买状态失败')
-      }
-
-      const price = getSelectedAppPrice()
-      purchaseStatus.value = {
-        purchased: !!payload.purchased,
-        needsPurchase: !!payload.needsPurchase,
-        status: payload.status || 'unknown',
-        error: payload.error || null
-      }
-
-      if (payload.purchased) {
-        purchaseStatusText.value = price !== null && price > 0 ? '当前账号已购买' : '当前账号已领取'
-        return true
-      }
-
-      if (isStoreMismatchError(payload.error)) {
-        const reg = account?.region ? `（如 ${account.region}）` : ''
-        purchaseStatusText.value = `账号区域${reg}与应用商店不一致`
-        return false
-      }
-
-      if (payload.needsPurchase) {
-        purchaseStatusText.value = price !== null && price > 0 ? '当前账号未购买' : '当前账号未领取'
-        return false
-      }
-
-      purchaseStatusText.value = payload.error ? `检测失败：${payload.error}` : '状态未知'
-      return false
-    } catch (error) {
-      purchaseStatusText.value = '检测失败'
-      console.warn('Preflight purchase gate failed:', error)
-      return false
-    } finally {
-      checkingPurchaseStatus.value = false
-    }
+  const preflightPurchaseGate = async (account, appId, appVerId) => {
+    if (!account?.token) throw new Error('账号无效，请重新选择账号')
+    return refreshPurchaseStatus(appId, appVerId)
   }
 
   // ===== Download Functions =====
@@ -354,8 +332,17 @@ export function useDownload(options = {}) {
     }
 
     if (!autoPurchase) {
-      const allowed = await preflightPurchaseGate(account)
+      const selectedAppId = selectedApp.value?.trackId
+      const token = account.token
+      const allowed = await preflightPurchaseGate(account, appId, appVerId)
+      if (selectedApp.value?.trackId !== selectedAppId || selectedAccount.value !== accountIndex ||
+          accounts.value[accountIndex]?.token !== token) {
+        throw new Error('应用或账号已切换，请重新下载')
+      }
       if (!allowed) {
+        if (!purchaseRequired.value) {
+          throw new Error(downloadBlockedReason.value || purchaseStatusText.value || '状态未知，请重试')
+        }
         const err = purchaseStatus.value?.error || ''
         if (isStoreMismatchError(err)) {
           const msg = getStoreMismatchMessage(account)
@@ -432,7 +419,7 @@ export function useDownload(options = {}) {
           activeDownloadAppId.value = ''
           activeDownloadVersionId.value = ''
           activeDownloadAccountEmail.value = ''
-          throw new Error(downloadBlockedReason.value || '当前账号未购买/未领取')
+          throw new Error(errMsg || downloadBlockedReason.value || '当前账号未购买/未领取')
         }
         throw new Error(data.error || '未知错误')
       }
@@ -835,10 +822,9 @@ export function useDownload(options = {}) {
         throw new Error(errMsg || '获取应用失败')
       }
 
-      await refreshPurchaseStatus(appId, appVerId)
-
-      if (purchaseRequired.value) {
-        throw new Error('获取应用后状态仍未更新，请稍后重试')
+      const verified = await refreshPurchaseStatus(appId, appVerId)
+      if (!verified) {
+        throw new Error(downloadBlockedReason.value || purchaseStatusText.value || '获取应用后状态仍未更新，请稍后重试')
       }
 
       claimingSelectedApp.value = false

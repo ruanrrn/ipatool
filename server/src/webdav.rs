@@ -254,19 +254,22 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Result<Vec<DirEntry>, W
     let mut reader = Reader::from_str(xml);
     reader.trim_text(true);
 
+    let base_path = extract_url_path(base_url);
+
     let mut entries: Vec<DirEntry> = Vec::new();
     let mut current_href: Option<String> = None;
     let mut is_collection = false;
     let mut in_propstat = false;
     let mut in_prop = false;
-    let mut status_is_200 = false;
     let mut in_href = false;
     let mut in_status = false;
+    let mut status_is_200 = false;
+    let mut prop_has_collection = false;
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let name = e.name();
                 match name.local_name().as_ref() {
                     b"response" => {
@@ -275,9 +278,12 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Result<Vec<DirEntry>, W
                         in_propstat = false;
                         in_prop = false;
                         status_is_200 = false;
+                        prop_has_collection = false;
                     }
                     b"propstat" => {
                         in_propstat = true;
+                        prop_has_collection = false;
+                        status_is_200 = false;
                     }
                     b"prop" => {
                         if in_propstat {
@@ -285,8 +291,8 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Result<Vec<DirEntry>, W
                         }
                     }
                     b"collection" => {
-                        if in_prop && status_is_200 {
-                            is_collection = true;
+                        if in_prop {
+                            prop_has_collection = true;
                         }
                     }
                     b"href" => {
@@ -303,48 +309,60 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Result<Vec<DirEntry>, W
                     if in_href {
                         current_href = Some(text.to_string());
                     } else if in_status {
-                        status_is_200 = text.contains("200 OK");
+                        status_is_200 = text.contains("200 OK") || text.contains("200");
                     }
                 }
             }
             Ok(Event::End(ref e)) => {
                 let name = e.name();
                 match name.local_name().as_ref() {
-                    b"response" => {
-                        if let Some(ref href) = current_href {
-                            let normalized_href = href.trim_end_matches('/');
-                            let normalized_base = base_url.trim_end_matches('/');
-                            if normalized_href == normalized_base {
-                                continue;
-                            }
-                            let name_part = normalized_href
-                                .rsplit_once('/')
-                                .map(|(_, n)| n)
-                                .unwrap_or(normalized_href);
-                            let decoded = urlencoding::decode(name_part)
-                                .unwrap_or(std::borrow::Cow::Borrowed(name_part));
-                            let rel_path = if let Some(stripped) =
-                                normalized_href.strip_prefix(normalized_base)
-                            {
-                                let rest = stripped.trim_start_matches('/');
-                                if rest.is_empty() {
-                                    String::new()
-                                } else {
-                                    rest.to_string()
-                                }
-                            } else {
-                                name_part.to_string()
-                            };
-                            entries.push(DirEntry {
-                                name: decoded.to_string(),
-                                path: rel_path,
-                                is_dir: is_collection,
-                            });
-                        }
-                    }
                     b"propstat" => {
+                        if prop_has_collection && (status_is_200 || !in_status) {
+                            is_collection = true;
+                        }
                         in_propstat = false;
                         in_prop = false;
+                        prop_has_collection = false;
+                    }
+                    b"response" => {
+                        if let Some(ref href) = current_href {
+                            let href_path = extract_url_path(href);
+
+                            // 跳过自身目录
+                            if href_path == base_path {
+                                continue;
+                            }
+
+                            let name = href_path
+                                .rsplit_once('/')
+                                .map(|(_, n)| n)
+                                .unwrap_or(&href_path)
+                                .to_string();
+
+                            if name.is_empty() {
+                                continue;
+                            }
+
+                            let rel_path =
+                                if let Some(stripped) = href_path.strip_prefix(&base_path) {
+                                    let rest = stripped.trim_start_matches('/');
+                                    if rest.is_empty() {
+                                        name.clone()
+                                    } else {
+                                        rest.to_string()
+                                    }
+                                } else {
+                                    name.clone()
+                                };
+
+                            let is_dir = is_collection || href.ends_with('/');
+
+                            entries.push(DirEntry {
+                                name,
+                                path: rel_path,
+                                is_dir,
+                            });
+                        }
                     }
                     b"href" => {
                         in_href = false;
@@ -364,5 +382,86 @@ fn parse_propfind_response(xml: &str, base_url: &str) -> Result<Vec<DirEntry>, W
         buf.clear();
     }
 
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
     Ok(entries)
+}
+
+fn extract_url_path(raw: &str) -> String {
+    let path = if let Ok(parsed) = reqwest::Url::parse(raw) {
+        parsed.path().to_string()
+    } else {
+        raw.split('?').next().unwrap_or(raw).to_string()
+    };
+    let unescaped = urlencoding::decode(&path).unwrap_or(std::borrow::Cow::Borrowed(&path));
+    unescaped.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_propfind_extracts_directories_and_files() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/photos/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/ipa%20files/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/app.ipa</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype/>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+
+        let entries = parse_propfind_response(xml, "https://example.com/dav/").unwrap();
+        // Self (/dav/) should be skipped
+        assert_eq!(entries.len(), 3);
+
+        // Directories first, sorted
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].name, "ipa files");
+        assert_eq!(entries[0].path, "ipa files");
+
+        assert!(entries[1].is_dir);
+        assert_eq!(entries[1].name, "photos");
+        assert_eq!(entries[1].path, "photos");
+
+        assert!(!entries[2].is_dir);
+        assert_eq!(entries[2].name, "app.ipa");
+        assert_eq!(entries[2].path, "app.ipa");
+    }
 }

@@ -1,0 +1,5 @@
+# Build context: an extracted ipatool-kbsync-bundle, not the source directory.
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+COPY . /opt/ipatool-kbsync/
+USER 65532:65532
+ENTRYPOINT ["/opt/ipatool-kbsync/ipatool-kbsync"]

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+: "${XDG_CACHE_HOME:=${KBSYNC_CACHE_HOME:-${TMPDIR:-${HOME}/.hermes/cache/scratch}/kbsync-runtime-cache}}"
+export XDG_CACHE_HOME
+exec "$root/bin/ipatool-kbsync" "$@"

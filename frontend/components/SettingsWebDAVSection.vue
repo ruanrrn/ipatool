@@ -70,10 +70,16 @@
             autocomplete="new-password"
           >
         </label>
-        <label class="webdav__field">
-          <span class="webdav__field-label">远程目录</span>
+        <div class="webdav__field">
+          <label
+            class="webdav__field-label"
+            for="webdav-remote-path"
+          >
+            远程目录
+          </label>
           <div class="webdav__path-row">
             <input
+              id="webdav-remote-path"
               v-model="form.remote_path"
               class="webdav__input webdav__input--path"
               type="text"
@@ -84,7 +90,7 @@
               class="webdav__browse-btn"
               type="button"
               :disabled="browsing || !form.url.trim()"
-              @click="openBrowser('/')"
+              @click="openBrowser(form.remote_path)"
             >
               {{ browsing ? '加载中…' : '浏览' }}
             </button>
@@ -98,53 +104,85 @@
             <div class="webdav__browser-header">
               <button
                 class="webdav__browser-nav"
-                :disabled="browserHistory.length === 0"
+                type="button"
+                :disabled="!canGoUp || browsing"
                 @click="goUp"
               >
                 ← 上级
               </button>
-              <span class="webdav__browser-path">{{ browserPath }}</span>
+              <span
+                class="webdav__browser-path"
+                :title="browserPath"
+              >
+                {{ browserPath }}
+              </span>
             </div>
             <div class="webdav__browser-body">
               <div
-                v-if="browseError"
+                v-if="browsing"
+                class="webdav__browse-loading"
+              >
+                正在读取目录…
+              </div>
+              <div
+                v-else-if="browseError"
                 class="webdav__browse-error"
               >
-                {{ browseError }}
+                <div>{{ browseError }}</div>
+                <button
+                  v-if="browserPath !== '/'"
+                  type="button"
+                  class="webdav__browse-retry-btn"
+                  @click="loadDirectory('/')"
+                >
+                  返回根目录
+                </button>
+              </div>
+              <div
+                v-else-if="entries.length === 0"
+                class="webdav__browse-empty"
+              >
+                当前目录为空
               </div>
               <div
                 v-for="entry in entries"
-                :key="entry.path"
+                v-else
+                :key="entry.name"
                 class="webdav__browser-entry"
-                :class="{ 'webdav__browser-entry--dir': entry.is_dir }"
-                @click="entry.is_dir ? navigate(entry.path) : null"
+                :class="{
+                  'webdav__browser-entry--dir': entry.is_dir,
+                  'webdav__browser-entry--file': !entry.is_dir,
+                }"
+                @click="entry.is_dir ? navigate(entry.name || entry.path) : null"
               >
                 <span class="webdav__browser-icon">{{ entry.is_dir ? '📁' : '📄' }}</span>
                 <span class="webdav__browser-name">{{ entry.name }}</span>
-              </div>
-              <div
-                v-if="!browseError && entries.length === 0 && !browsing"
-                class="webdav__browse-empty"
-              >
-                目录为空
+                <span
+                  v-if="entry.is_dir"
+                  class="webdav__browser-arrow"
+                >
+                  ›
+                </span>
               </div>
             </div>
             <div class="webdav__browser-footer">
               <button
                 class="webdav__btn webdav__btn--primary webdav__browser-select"
+                type="button"
                 @click="selectCurrent"
               >
-                选择此目录
+                选择此目录 ({{ browserPath }})
               </button>
               <button
                 class="webdav__btn webdav__btn--secondary"
+                type="button"
                 @click="showBrowser = false"
               >
-                取消
+                关闭
               </button>
             </div>
           </div>
-        </label>
+        </div>
       </div>
 
       <!-- Test Result -->
@@ -178,7 +216,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { API_BASE } from '../config.js'
 import { apiFetch } from '../utils/api.js'
 
@@ -258,6 +296,11 @@ async function handleTest() {
 }
 
 // Directory browser
+const canGoUp = computed(() => {
+  const p = browserPath.value.trim().replace(/\/+$/, '')
+  return browserHistory.value.length > 0 || (p !== '' && p !== '/')
+})
+
 function buildBrowsePayload() {
   return {
     url: form.url,
@@ -270,14 +313,22 @@ function buildBrowsePayload() {
 async function openBrowser(path) {
   showBrowser.value = true
   browserHistory.value = []
-  await loadDirectory(path)
+  const initial = (path || form.remote_path || '/').trim() || '/'
+  await loadDirectory(initial)
 }
 
 async function loadDirectory(path) {
   browsing.value = true
   browseError.value = null
   entries.value = []
-  browserPath.value = path
+
+  let normalized = (path || '/').trim()
+  if (!normalized.startsWith('/')) {
+    normalized = `/${normalized}`
+  }
+  normalized = normalized.replace(/\/+$/, '') || '/'
+  browserPath.value = normalized
+
   try {
     const { data } = await apiFetch(`${API_BASE}/webdav/browse`, {
       method: 'POST',
@@ -285,11 +336,13 @@ async function loadDirectory(path) {
       body: JSON.stringify(buildBrowsePayload()),
     })
     if (data?.ok && data.data) {
-      if (data.data.entries) {
+      if (Array.isArray(data.data.entries)) {
         entries.value = data.data.entries
       } else if (data.data.ok === false) {
-        browseError.value = data.data.message
+        browseError.value = data.data.message || '获取目录失败'
       }
+    } else {
+      browseError.value = data?.error || '无法读取 WebDAV 目录'
     }
   } catch (e) {
     browseError.value = `请求失败: ${e.message || e}`
@@ -298,18 +351,29 @@ async function loadDirectory(path) {
   }
 }
 
-function navigate(path) {
+function navigate(subDir) {
+  if (!subDir) return
   browserHistory.value.push(browserPath.value)
-  const newPath = browserPath.value === '/'
-    ? `/${path}`
-    : `${browserPath.value.replace(/\/$/, '')}/${path}`
+  const current = browserPath.value.replace(/\/+$/, '')
+  const cleanSub = String(subDir).replace(/^\/+/, '')
+  const newPath = current === '' || current === '/'
+    ? `/${cleanSub}`
+    : `${current}/${cleanSub}`
   loadDirectory(newPath)
 }
 
 function goUp() {
-  if (browserHistory.value.length === 0) return
-  const prev = browserHistory.value.pop()
-  loadDirectory(prev)
+  if (browserHistory.value.length > 0) {
+    const prev = browserHistory.value.pop()
+    loadDirectory(prev)
+    return
+  }
+  const current = browserPath.value.trim().replace(/\/+$/, '')
+  if (!current || current === '/') return
+  const parts = current.split('/').filter(Boolean)
+  parts.pop()
+  const parentPath = parts.length === 0 ? '/' : `/${parts.join('/')}`
+  loadDirectory(parentPath)
 }
 
 function selectCurrent() {
@@ -534,12 +598,29 @@ function selectCurrent() {
 }
 .webdav__browser-entry--dir {
   cursor: pointer;
+  user-select: none;
 }
 .webdav__browser-entry--dir:hover {
   background: var(--color-surface-muted, #f7f7f8);
 }
 .dark .webdav__browser-entry--dir:hover {
   background: var(--color-surface-muted, #27272a);
+}
+.webdav__browser-entry--dir:active {
+  background: var(--color-surface-hover, #e4e4e7);
+}
+.dark .webdav__browser-entry--dir:active {
+  background: var(--color-surface-hover, #3f3f46);
+}
+.webdav__browser-entry--file {
+  opacity: 0.65;
+}
+.webdav__browser-arrow {
+  margin-left: auto;
+  font-size: 16px;
+  color: var(--color-text-muted, #a1a1aa);
+  font-weight: 600;
+  padding-left: 8px;
 }
 .webdav__browser-icon {
   font-size: 14px;
@@ -549,9 +630,11 @@ function selectCurrent() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
 .webdav__browse-empty,
-.webdav__browse-error {
+.webdav__browse-error,
+.webdav__browse-loading {
   padding: 20px 12px;
   text-align: center;
   font-size: 12px;
@@ -559,6 +642,24 @@ function selectCurrent() {
 }
 .webdav__browse-error {
   color: var(--color-danger, #ef4444);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.webdav__browse-retry-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border, #d4d4d8);
+  background: var(--color-surface, #fff);
+  color: var(--color-text, #0d0d0d);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dark .webdav__browse-retry-btn {
+  background: var(--color-surface, #1a1a2e);
+  border-color: var(--color-border, #3f3f46);
+  color: var(--color-text, #f5f5f5);
 }
 .webdav__browser-footer {
   display: flex;

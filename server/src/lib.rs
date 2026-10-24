@@ -1,4 +1,5 @@
 pub mod apple_auth;
+pub mod apple_download_recovery;
 pub mod crypto;
 pub mod database;
 pub mod download_manager;
