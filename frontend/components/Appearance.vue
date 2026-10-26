@@ -137,15 +137,15 @@ const darkModeLabel = computed(() => {
 })
 
 // Accent color
-const accentColor = ref('#10a37f')
+const accentColor = ref('#10a37f') // color-literal-ok: default accent value
 
 const accentColors = [
-  { value: '#10a37f', label: '绿' }, /* user-selectable */
-  { value: '#3b82f6', label: '蓝' }, /* user-selectable */
-  { value: '#8b5cf6', label: '紫' }, /* user-selectable */
-  { value: '#f59e0b', label: '琥珀' }, /* user-selectable */
-  { value: '#ef4444', label: '红' }, /* user-selectable */
-  { value: '#0d0d0d', label: '黑' } /* user-selectable */
+  { value: '#10a37f', label: '绿' }, /* color-literal-ok: user-selectable accent value */
+  { value: '#3b82f6', label: '蓝' }, /* color-literal-ok: user-selectable accent value */
+  { value: '#8b5cf6', label: '紫' }, /* color-literal-ok: user-selectable accent value */
+  { value: '#f59e0b', label: '琥珀' }, /* color-literal-ok: user-selectable accent value */
+  { value: '#ef4444', label: '红' }, /* color-literal-ok: user-selectable accent value */
+  { value: '#0d0d0d', label: '黑' } /* color-literal-ok: user-selectable accent value */
 ]
 
 // Load saved preferences
@@ -446,7 +446,7 @@ function setAccentColor(color) {
   top: 2px;
   left: 2px;
   transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  box-shadow: 0 1px 3px rgba(var(--rgb-black), 0.15);
 }
 .ap-toggle--on .ap-toggle__thumb {
   transform: translateX(18px);

@@ -81,8 +81,8 @@ const formatFileSize = (bytes) => {
 
 <style scoped>
 .dark .queue-item--done {
- background: var(--color-surface, #18181b);
- border-color: var(--color-surface-muted, #27272a);
+ background: var(--color-surface);
+ border-color: var(--color-surface-muted);
 }
 
 /* Queue Item */
@@ -91,8 +91,8 @@ const formatFileSize = (bytes) => {
  align-items: center;
  gap: 12px;
  padding: 12px;
- background: var(--color-surface, #fff);
- border: 1px solid var(--color-border, #ebebeb);
+ background: var(--color-surface);
+ border: 1px solid var(--color-border);
  border-radius: var(--radius-xl);
  transition: opacity 0.2s ease;
 }
@@ -100,8 +100,8 @@ const formatFileSize = (bytes) => {
  opacity: 0.8;
 }
 .dark .queue-item {
- background: var(--color-surface, #18181b);
- border-color: var(--color-surface-muted, #27272a);
+ background: var(--color-surface);
+ border-color: var(--color-surface-muted);
 }
 
 /* Icon container — override AppArtwork sizing */
@@ -121,24 +121,24 @@ const formatFileSize = (bytes) => {
 .queue-item__name {
  font-size: var(--font-size-body);
  font-weight: 600;
- color: var(--color-text, #0d0d0d);
+ color: var(--color-text);
  white-space: nowrap;
  overflow: hidden;
  text-overflow: ellipsis;
 }
 .dark .queue-item__name {
- color: var(--color-text, #f5f5f5);
+ color: var(--color-text);
 }
 
 .queue-item__meta {
  display: flex;
  gap: 10px;
  font-size: var(--font-size-micro);
- color: var(--color-text-muted, #6e6e80);
+ color: var(--color-text-muted);
  margin-top: 2px;
 }
 .dark .queue-item__meta {
- color: var(--color-text-muted, #a1a1aa);
+ color: var(--color-text-muted);
 }
 
 /* Actions */
@@ -153,9 +153,9 @@ const formatFileSize = (bytes) => {
  width: 32px;
  height: 32px;
  border-radius: var(--radius-base);
- border: 1px solid var(--color-border, #ebebeb);
- background: var(--color-surface, #fff);
- color: var(--color-text-muted, #6e6e80);
+ border: 1px solid var(--color-border);
+ background: var(--color-surface);
+ color: var(--color-text-muted);
  font-size: var(--font-size-body);
  display: flex;
  align-items: center;
@@ -184,9 +184,9 @@ const formatFileSize = (bytes) => {
   }
 }
 .dark .q-btn {
- background: var(--color-surface, #18181b);
- border-color: var(--color-surface-muted, #27272a);
- color: var(--color-text-muted, #a1a1aa);
+ background: var(--color-surface);
+ border-color: var(--color-surface-muted);
+ color: var(--color-text-muted);
 }
 .q-btn:active {
   opacity: 0.7;
@@ -198,8 +198,8 @@ const formatFileSize = (bytes) => {
 }
 .dark .q-btn--download {
   color: var(--color-primary);
-  border-color: rgba(16, 163, 127, 0.3);
-  background: rgba(16, 163, 127, 0.15);
+  border-color: rgba(var(--rgb-brand), 0.3);
+  background: rgba(var(--rgb-brand), 0.15);
 }
 
 .q-btn--install {
@@ -208,8 +208,8 @@ const formatFileSize = (bytes) => {
 }
 .dark .q-btn--install {
   color: var(--color-primary);
-  border-color: rgba(16, 163, 127, 0.3);
-  background: rgba(16, 163, 127, 0.15);
+  border-color: rgba(var(--rgb-brand), 0.3);
+  background: rgba(var(--rgb-brand), 0.15);
 }
 
 .q-btn--danger {
@@ -218,7 +218,7 @@ const formatFileSize = (bytes) => {
 }
 .dark .q-btn--danger {
   color: var(--color-danger);
-  border-color: rgba(239, 68, 68, 0.3);
-  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(var(--rgb-red), 0.3);
+  background: rgba(var(--rgb-red), 0.15);
 }
 </style>

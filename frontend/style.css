@@ -362,9 +362,9 @@
 .dark input[type="search"],
 .dark textarea,
 .dark select {
-  background-color: var(--color-surface-muted, #27272a);
-  border-color: var(--color-border, #3f3f46);
-  color: var(--color-text, #f5f5f5);
+  background-color: var(--color-surface-muted);
+  border-color: var(--color-border);
+  color: var(--color-text);
   color-scheme: dark;
 }
 

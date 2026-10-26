@@ -20,7 +20,7 @@ const props = defineProps({
   },
   color: {
     type: String,
-    default: 'var(--color-primary, #10a37f)'
+    default: 'var(--color-primary)'
   },
   size: {
     type: String,
@@ -35,12 +35,12 @@ const clampedPercent = computed(() => Math.min(100, Math.max(0, props.percent)))
 <style scoped>
 .progress-bar {
   width: 100%;
-  background: var(--color-border, #ebebeb);
+  background: var(--color-border);
   border-radius: 2px;
   overflow: hidden;
 }
 .dark .progress-bar {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 .progress-bar__fill {
   height: 100%;

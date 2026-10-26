@@ -278,7 +278,7 @@ defineExpose({
   flex-direction: column;
   min-height: 100svh;
   min-height: 100dvh;
-  background: var(--color-bg-page, #f0f0f0);
+  background: var(--color-bg-page);
 }
 
 .dark .appearance-page {
@@ -295,14 +295,14 @@ defineExpose({
   min-height: calc(56px + env(safe-area-inset-top, 0px));
   margin: 0 calc(var(--space-5) * -1) 20px;
   padding: env(safe-area-inset-top, 0px) var(--space-5) 0;
-  background: var(--color-bg-white, #fff);
-  border-bottom: 1px solid var(--color-border-light, #f0f0f0);
+  background: var(--color-bg-white);
+  border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
 }
 
 .dark .ap-nav {
-  background: var(--color-surface, #111111);
-  border-bottom-color: var(--color-border, #27272a);
+  background: var(--color-surface);
+  border-bottom-color: var(--color-border);
 }
 
 .ap-nav__back {
@@ -314,7 +314,7 @@ defineExpose({
   padding: 0;
   font-size: 15px;
   font-weight: 500;
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
   cursor: pointer;
 }
 
@@ -326,11 +326,11 @@ defineExpose({
 .ap-nav__title {
   font-size: 17px;
   font-weight: 600;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
 }
 
 .dark .ap-nav__title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 .ap-nav__spacer {
@@ -349,26 +349,26 @@ defineExpose({
 .ap-section__title {
   font-size: var(--font-size-caption);
   font-weight: 500;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 6px;
 }
 
 .dark .ap-section__title {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .ap-card {
-  background: var(--color-surface-muted, #f7f7f8);
-  border: 1px solid var(--color-border, #ebebeb);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   overflow: hidden;
 }
 
 .dark .ap-card {
-  background: var(--color-surface, #18181b);
-  border-color: var(--color-surface-muted, #27272a);
+  background: var(--color-surface);
+  border-color: var(--color-surface-muted);
 }
 
 .ap-card--form {
@@ -385,11 +385,11 @@ defineExpose({
   padding-top: 8px;
   text-align: center;
   font-size: var(--font-size-caption);
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
 }
 
 .dark .ap-form__hint {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 
 /* Inline checkbox styles for save-password */
@@ -423,9 +423,9 @@ defineExpose({
  justify-content: center;
  width: 22px;
  height: 22px;
- border: 2px solid var(--color-border-strong, #d1d5db);
+ border: 2px solid var(--color-border-strong);
  border-radius: var(--radius-base);
- background: var(--color-surface, #fff);
+ background: var(--color-surface);
  transition: all 0.2s ease;
  flex-shrink: 0;
 }
@@ -441,8 +441,8 @@ defineExpose({
 
 :deep(.mobile-checkbox--checked) .mobile-checkbox__box,
 .mobile-checkbox:has(.mobile-checkbox__input:checked) .mobile-checkbox__box {
- background: var(--color-primary, #10a37f);
- border-color: var(--color-primary, #10a37f);
+ background: var(--color-primary);
+ border-color: var(--color-primary);
 }
 
 :deep(.mobile-checkbox--checked) .mobile-checkbox__check,
@@ -454,7 +454,7 @@ defineExpose({
 .mobile-checkbox__label {
  font-size: 14px;
  font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif;
- color: var(--color-text, #0d0d0d);
+ color: var(--color-text);
  line-height: 1.4;
 }
 
@@ -466,16 +466,16 @@ defineExpose({
 
 /* Dark mode for inline checkbox */
 .dark .mobile-checkbox__box {
- background: rgba(255, 255, 255, 0.08);
- border-color: rgba(255, 255, 255, 0.2);
+ background: rgba(var(--rgb-white), 0.08);
+ border-color: rgba(var(--rgb-white), 0.2);
 }
 
 .dark .mobile-checkbox:has(.mobile-checkbox__input:checked) .mobile-checkbox__box {
- background: var(--color-primary, #10a37f);
- border-color: var(--color-primary, #10a37f);
+ background: var(--color-primary);
+ border-color: var(--color-primary);
 }
 
 .dark .mobile-checkbox__label {
- color: var(--color-text, #f5f5f5);
+ color: var(--color-text);
 }
 </style>

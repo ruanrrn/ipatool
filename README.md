@@ -205,6 +205,7 @@ server {
 | `BIND_ADDRESS` | — | Full listen address, e.g. `127.0.0.1:8080`; overrides `PORT` |
 | `IPA_TOOL_PUBLIC_BASE_URL` | — | Public origin used in OTA/download links, e.g. `https://ipa.example.com` |
 | `FORCE_SECURE_COOKIE` | auto | `1` always sets the `Secure` cookie flag, `0` never; by default it follows the request scheme |
+| `TRUSTED_PROXIES` | loopback + private ranges | Peers whose `X-Forwarded-For` / `X-Real-IP` is trusted for login rate limiting: comma-separated IPs/CIDRs, `*` for any, `none` to ignore the headers |
 | `IPA_ADMIN_INITIAL_PASSWORD` | random | Admin password used on first start only |
 | `DATABASE_PATH` | `data/ipa-webtool.db` | SQLite database location |
 

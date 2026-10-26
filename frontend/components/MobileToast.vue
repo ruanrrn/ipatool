@@ -450,7 +450,7 @@ export { Toast }
   max-width: 100%;
   max-height: min(60vh, 420px);
   padding: var(--space-3) var(--space-4);
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(var(--rgb-white), 0.9);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-radius: var(--radius-card);
@@ -546,8 +546,8 @@ export { Toast }
 
 /* 深色模式 */
 .dark .mobile-toast {
-  background: rgba(30, 30, 30, 0.9);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--rgb-neutral-900), 0.9);
+  border-color: rgba(var(--rgb-white), 0.1);
   color: var(--text-primary);
 }
 
@@ -557,7 +557,7 @@ export { Toast }
 
 .dark .mobile-toast__close:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--rgb-white), 0.1);
 }
 
 /* 高对比度模式 */

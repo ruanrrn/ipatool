@@ -248,7 +248,7 @@ async function handleSubmit() {
   display: flex;
   flex-direction: column;
   min-height: auto;
-  background: var(--color-bg-page, #f0f0f0);
+  background: var(--color-bg-page);
 }
 .dark .change-password-page {
   background: var(--color-bg);
@@ -265,13 +265,13 @@ async function handleSubmit() {
   min-height: calc(56px + env(safe-area-inset-top, 0px));
   margin: 0 calc(var(--space-5) * -1) 20px;
   padding: env(safe-area-inset-top, 0px) var(--space-5) 0;
-  background: var(--color-bg-white, #fff);
-  border-bottom: 1px solid var(--color-border-light, #f0f0f0);
+  background: var(--color-bg-white);
+  border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
 }
 .dark .cp-nav {
-  background: var(--color-surface, #111111);
-  border-bottom-color: var(--color-border, #27272a);
+  background: var(--color-surface);
+  border-bottom-color: var(--color-border);
 }
 .cp-nav__back {
   display: inline-flex;
@@ -282,7 +282,7 @@ async function handleSubmit() {
   padding: 0;
   font-size: 15px;
   font-weight: 500;
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
   cursor: pointer;
 }
 .cp-nav__back-icon {
@@ -292,10 +292,10 @@ async function handleSubmit() {
 .cp-nav__title {
   font-size: 17px;
   font-weight: 600;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
 }
 .dark .cp-nav__title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .cp-nav__spacer {
   flex: 1;
@@ -315,8 +315,8 @@ async function handleSubmit() {
   align-items: flex-start;
   gap: 10px;
   padding: 14px 16px;
-  background: var(--color-primary-soft, #ecfdf5);
-  border: 1px solid var(--color-primary-border, #a7f3d0);
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-primary-border);
   border-radius: 12px;
   margin-bottom: 24px;
 }
@@ -331,8 +331,8 @@ async function handleSubmit() {
   color: var(--color-text-tag);
 }
 .dark .cp-hint {
-  background: rgba(16, 163, 127, 0.1);
-  border-color: rgba(16, 163, 127, 0.3);
+  background: rgba(var(--rgb-brand), 0.1);
+  border-color: rgba(var(--rgb-brand), 0.3);
 }
 .dark .cp-hint__text {
   color: var(--color-text);
@@ -404,11 +404,11 @@ async function handleSubmit() {
   -webkit-tap-highlight-color: transparent;
 }
 .cp-submit:active:not(:disabled) {
-  background: var(--color-primary-active, #0c7a5e);
+  background: var(--color-primary-active);
   transform: scale(0.98);
 }
 .cp-submit:disabled {
-  background: var(--color-text-disabled, #d1d5db);
+  background: var(--color-text-disabled);
   cursor: not-allowed;
 }
 </style>

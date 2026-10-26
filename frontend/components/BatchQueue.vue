@@ -277,22 +277,22 @@ async function handleDelete(task) {
 .batch-queue__title {
   font-size: 18px;
   font-weight: 700;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
   margin: 0;
 }
 .dark .batch-queue__title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .batch-queue__count {
   font-size: 12px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .dark .batch-queue__count {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-queue__refresh {
   font-size: 13px;
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
   background: none;
   border: none;
   cursor: pointer;
@@ -320,26 +320,26 @@ async function handleDelete(task) {
 .batch-queue__empty-text {
   font-size: 14px;
   font-weight: 600;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   margin: 0 0 4px;
 }
 .dark .batch-queue__empty-text {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-queue__empty-desc {
   font-size: 12px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   margin: 0;
 }
 .dark .batch-queue__empty-desc {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 /* Skeleton */
 .skeleton--card {
   height: 72px;
   border-radius: 14px;
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
   animation: skeleton-pulse 1.5s ease-in-out infinite;
 }
 @keyframes skeleton-pulse {
@@ -350,17 +350,17 @@ async function handleDelete(task) {
 /* Task card */
 .batch-task {
   border-radius: 14px;
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #ebebeb);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   overflow: hidden;
   transition: border-color 0.15s ease;
 }
 .dark .batch-task {
-  background: var(--color-surface, #18181b);
-  border-color: var(--color-border, #27272a);
+  background: var(--color-surface);
+  border-color: var(--color-border);
 }
 .batch-task--expanded {
-  border-color: var(--color-primary, #10a37f);
+  border-color: var(--color-primary);
 }
 
 .batch-task__header {
@@ -391,11 +391,11 @@ async function handleDelete(task) {
   flex-shrink: 0;
 }
 .batch-task__status-dot--processing {
-  background: var(--color-primary, #10a37f);
+  background: var(--color-primary);
   animation: pulse-dot 1.5s ease-in-out infinite;
 }
 .batch-task__status-dot--completed {
-  background: var(--color-text-muted, #6e6e80);
+  background: var(--color-text-muted);
 }
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
@@ -404,27 +404,27 @@ async function handleDelete(task) {
 .batch-task__name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dark .batch-task__name {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .batch-task__meta {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
   font-size: 12px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   margin-bottom: 8px;
 }
 .dark .batch-task__meta {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-task__meta-item--failed {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
 }
 .batch-task__meta-item--time {
   opacity: 0.7;
@@ -434,11 +434,11 @@ async function handleDelete(task) {
 .batch-task__progress-track {
   height: 4px;
   border-radius: 2px;
-  background: var(--color-border, #ebebeb);
+  background: var(--color-border);
   overflow: hidden;
 }
 .dark .batch-task__progress-track {
-  background: var(--color-border, #27272a);
+  background: var(--color-border);
 }
 .batch-task__progress-fill {
   height: 100%;
@@ -446,10 +446,10 @@ async function handleDelete(task) {
   transition: width 0.3s ease;
 }
 .batch-task__progress-fill--processing {
-  background: var(--color-primary, #10a37f);
+  background: var(--color-primary);
 }
 .batch-task__progress-fill--completed {
-  background: var(--color-text-muted, #6e6e80);
+  background: var(--color-text-muted);
 }
 
 .batch-task__actions {
@@ -461,42 +461,42 @@ async function handleDelete(task) {
 .batch-task__percent {
   font-size: 13px;
   font-weight: 600;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   min-width: 36px;
   text-align: right;
 }
 .dark .batch-task__percent {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-task__chevron {
   width: 16px;
   height: 16px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   transition: transform 0.2s ease;
 }
 .batch-task__chevron--open {
   transform: rotate(180deg);
 }
 .dark .batch-task__chevron {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 /* Expanded items */
 .batch-task__items {
-  border-top: 1px solid var(--color-border, #ebebeb);
+  border-top: 1px solid var(--color-border);
   padding: 8px 14px 14px;
 }
 .dark .batch-task__items {
-  border-color: var(--color-border, #27272a);
+  border-color: var(--color-border);
 }
 .batch-task__items-empty {
   padding: 16px;
   text-align: center;
   font-size: 13px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .dark .batch-task__items-empty {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 /* Item row */
@@ -505,10 +505,10 @@ async function handleDelete(task) {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--color-border, #ebebeb);
+  border-bottom: 1px solid var(--color-border);
 }
 .dark .batch-item {
-  border-color: var(--color-border, #27272a);
+  border-color: var(--color-border);
 }
 .batch-item:last-of-type {
   border-bottom: none;
@@ -522,16 +522,16 @@ async function handleDelete(task) {
   font-size: 14px;
 }
 .batch-item__status--completed {
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
 }
 .batch-item__status--failed {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
 }
 .batch-item__status--pending {
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .dark .batch-item__status--pending {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-item__body {
   flex: 1;
@@ -540,27 +540,27 @@ async function handleDelete(task) {
 .batch-item__name {
   font-size: 13px;
   font-weight: 500;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dark .batch-item__name {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .batch-item__sub {
   display: flex;
   gap: 8px;
   font-size: 11px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   margin-top: 2px;
 }
 .dark .batch-item__sub {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .batch-item__error {
   font-size: 11px;
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
   margin-top: 4px;
   word-break: break-word;
 }
@@ -578,23 +578,23 @@ async function handleDelete(task) {
   font-weight: 500;
 }
 .batch-item__badge--pending {
-  background: var(--color-surface-muted, #f7f7f8);
-  color: var(--color-text-muted, #6e6e80);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
 }
 .batch-item__badge--completed {
-  background: rgba(16, 163, 127, 0.12);
-  color: var(--color-primary, #10a37f);
+  background: rgba(var(--rgb-brand), 0.12);
+  color: var(--color-primary);
 }
 .batch-item__badge--failed {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--color-danger, #ef4444);
+  background: rgba(var(--rgb-red), 0.12);
+  color: var(--color-danger);
 }
 .batch-item__retry {
   font-size: 10px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .dark .batch-item__retry {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 /* Delete button */
@@ -603,17 +603,17 @@ async function handleDelete(task) {
   margin-top: 8px;
   padding: 8px;
   font-size: 12px;
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
   background: none;
-  border: 1px solid var(--color-border, #ebebeb);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
 .dark .batch-task__delete {
-  border-color: var(--color-border, #27272a);
+  border-color: var(--color-border);
 }
 .batch-task__delete:hover {
-  background: rgba(239, 68, 68, 0.06);
+  background: rgba(var(--rgb-red), 0.06);
 }
 </style>

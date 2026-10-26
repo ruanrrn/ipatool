@@ -54,9 +54,17 @@ struct AuthenticatedAdmin {
     pub session_token: String,
 }
 
+/// Failed admin logins allowed per client IP within `LOGIN_FAILURE_WINDOW`.
+const LOGIN_MAX_FAILURES_PER_IP: u32 = 5;
+/// Failed logins allowed per username (across all IPs) within the window. Higher than the
+/// per-IP limit: it only has to slow distributed guessing, and a low value let a single client
+/// keep the real admin locked out with a handful of requests.
+const LOGIN_MAX_FAILURES_PER_USER: u32 = 20;
+const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(900); // 15 minutes
+
 /// Per-IP and per-username login rate limiter.
-/// After LOGIN_RATE_LIMIT_MAX_FAILURES failed attempts within LOGIN_RATE_LIMIT_WINDOW,
-/// further attempts are rejected until the window elapses.
+/// After too many failed attempts within `LOGIN_FAILURE_WINDOW`, further attempts are rejected
+/// until the window since the last failure elapses.
 struct LoginRateLimiter {
     /// (attempt_count, last_attempt_time)
     ip_attempts: HashMap<String, (u32, Instant)>,
@@ -79,35 +87,37 @@ impl LoginRateLimiter {
             .retain(|_, (_, last)| now.duration_since(*last) < window);
     }
 
-    fn check_and_record(&mut self, ip: &str, username: &str) -> Result<(), String> {
-        const MAX_FAILURES: u32 = 5;
-        let window = Duration::from_secs(900); // 15 minutes
-        let lockout = Duration::from_secs(900);
+    fn lockout_remaining(
+        attempts: &HashMap<String, (u32, Instant)>,
+        key: &str,
+        max_failures: u32,
+        now: Instant,
+    ) -> Option<u64> {
+        let (count, last) = attempts.get(key)?;
+        let elapsed = now.duration_since(*last);
+        (*count >= max_failures && elapsed < LOGIN_FAILURE_WINDOW)
+            .then(|| (LOGIN_FAILURE_WINDOW - elapsed).as_secs().max(1))
+    }
 
+    /// Reject the attempt if the client IP or the username is currently locked out.
+    fn check(&mut self, ip: &str, username: &str) -> Result<(), String> {
         let now = Instant::now();
-        self.cleanup_expired(window);
+        self.cleanup_expired(LOGIN_FAILURE_WINDOW);
 
-        // Check IP-based rate limit
-        if let Some((count, last)) = self.ip_attempts.get(ip) {
-            if *count >= MAX_FAILURES {
-                let elapsed = now.duration_since(*last);
-                if elapsed < lockout {
-                    let remaining = lockout.as_secs() - elapsed.as_secs();
-                    return Err(format!("请求过于频繁，请 {} 秒后再试", remaining));
-                }
-                // Lockout expired, remove entry (will be re-added on next failure)
-            }
+        if let Some(remaining) =
+            Self::lockout_remaining(&self.ip_attempts, ip, LOGIN_MAX_FAILURES_PER_IP, now)
+        {
+            return Err(format!("请求过于频繁，请 {} 秒后再试", remaining));
         }
 
-        // Check username-based rate limit (prevents distributed attacks)
-        if let Some((count, last)) = self.user_attempts.get(username) {
-            if *count >= MAX_FAILURES {
-                let elapsed = now.duration_since(*last);
-                if elapsed < lockout {
-                    let remaining = lockout.as_secs() - elapsed.as_secs();
-                    return Err(format!("该账号登录尝试过于频繁，请 {} 秒后再试", remaining));
-                }
-            }
+        // Username-based limit (slows distributed attacks)
+        if let Some(remaining) = Self::lockout_remaining(
+            &self.user_attempts,
+            username,
+            LOGIN_MAX_FAILURES_PER_USER,
+            now,
+        ) {
+            return Err(format!("该账号登录尝试过于频繁，请 {} 秒后再试", remaining));
         }
 
         Ok(())
@@ -131,6 +141,135 @@ impl LoginRateLimiter {
         self.ip_attempts.remove(ip);
         self.user_attempts.remove(username);
     }
+}
+
+/// A proxy whose forwarding headers are believed: an exact address or a CIDR block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrustedProxy {
+    network: std::net::IpAddr,
+    prefix_len: u8,
+}
+
+impl TrustedProxy {
+    fn parse(value: &str) -> Option<Self> {
+        let (address, prefix) = match value.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
+            None => (value, None),
+        };
+        let network = address
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .ok()?
+            .to_canonical();
+        let max_prefix = if network.is_ipv4() { 32 } else { 128 };
+        let prefix_len = prefix.unwrap_or(max_prefix);
+        (prefix_len <= max_prefix).then_some(Self {
+            network,
+            prefix_len,
+        })
+    }
+
+    fn contains(&self, ip: std::net::IpAddr) -> bool {
+        use std::net::IpAddr;
+        match (self.network, ip.to_canonical()) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix_len))
+                    .unwrap_or(0);
+                u32::from(network) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix_len))
+                    .unwrap_or(0);
+                u128::from(network) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Which peers may set `X-Forwarded-For` / `X-Real-IP`.
+#[derive(Debug, Clone, PartialEq)]
+enum TrustedProxies {
+    All,
+    List(Vec<TrustedProxy>),
+}
+
+/// Loopback and private ranges: covers a reverse proxy on the same host, Docker bridge
+/// networks and LAN / tunnel sidecars, but not arbitrary internet clients.
+const DEFAULT_TRUSTED_PROXIES: &str =
+    "127.0.0.0/8,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7";
+
+impl TrustedProxies {
+    /// `TRUSTED_PROXIES`: comma-separated IPs/CIDRs, `*` for any peer, `none` for no proxy.
+    fn parse(value: Option<&str>) -> Self {
+        let value = value.map(str::trim).filter(|value| !value.is_empty());
+        match value {
+            Some("*") => Self::All,
+            Some(value) if value.eq_ignore_ascii_case("none") => Self::List(Vec::new()),
+            value => Self::List(
+                value
+                    .unwrap_or(DEFAULT_TRUSTED_PROXIES)
+                    .split(',')
+                    .filter_map(|entry| {
+                        let entry = entry.trim();
+                        let parsed = TrustedProxy::parse(entry);
+                        if parsed.is_none() && !entry.is_empty() {
+                            log::warn!("[trusted-proxies] ignoring invalid entry: {}", entry);
+                        }
+                        parsed
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn from_env() -> &'static Self {
+        static TRUSTED: std::sync::OnceLock<TrustedProxies> = std::sync::OnceLock::new();
+        TRUSTED.get_or_init(|| Self::parse(std::env::var("TRUSTED_PROXIES").ok().as_deref()))
+    }
+
+    fn trusts(&self, ip: std::net::IpAddr) -> bool {
+        match self {
+            Self::All => true,
+            Self::List(proxies) => proxies.iter().any(|proxy| proxy.contains(ip)),
+        }
+    }
+}
+
+/// Client IP for rate limiting. Forwarding headers are only honoured when the TCP peer is a
+/// trusted proxy; otherwise any client could rotate `X-Forwarded-For` to dodge the limit.
+/// `X-Forwarded-For` is walked right-to-left past trusted hops, then `X-Real-IP` is used.
+fn client_ip(req: &HttpRequest, trusted: &TrustedProxies) -> String {
+    let Some(peer) = req.peer_addr().map(|addr| addr.ip().to_canonical()) else {
+        return "unknown".to_string();
+    };
+    if !trusted.trusts(peer) {
+        return peer.to_string();
+    }
+
+    let forwarded = req
+        .headers()
+        .get_all("x-forwarded-for")
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|entry| entry.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .collect::<Vec<_>>();
+    if let Some(client) = forwarded.iter().rev().find(|ip| !trusted.trusts(**ip)) {
+        return client.to_string();
+    }
+    if let Some(first) = forwarded.first() {
+        return first.to_string();
+    }
+
+    req.headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_canonical().to_string())
+        .unwrap_or_else(|| peer.to_string())
 }
 
 // 应用状态
@@ -1927,6 +2066,90 @@ mod tests {
             .unwrap();
         assert!(!admin_password_hash_unchanged(&db, "admin", &snapshot));
         assert!(!admin_password_hash_unchanged(&db, "ghost", &snapshot));
+    }
+
+    fn request_from(peer: &str, headers: &[(&str, &str)]) -> HttpRequest {
+        let mut request = actix_web::test::TestRequest::default().peer_addr(peer.parse().unwrap());
+        for (name, value) in headers {
+            request = request.insert_header((*name, *value));
+        }
+        request.to_http_request()
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_matching() {
+        let private = TrustedProxy::parse("10.0.0.0/8").unwrap();
+        assert!(private.contains("10.1.2.3".parse().unwrap()));
+        assert!(!private.contains("11.0.0.1".parse().unwrap()));
+        assert!(!private.contains("::1".parse().unwrap()));
+
+        let loopback = TrustedProxy::parse("127.0.0.0/8").unwrap();
+        // IPv4-mapped IPv6 peers (dual-stack sockets) are matched as IPv4.
+        assert!(loopback.contains("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(TrustedProxy::parse("::1")
+            .unwrap()
+            .contains("::1".parse().unwrap()));
+        assert!(TrustedProxy::parse("0.0.0.0/0")
+            .unwrap()
+            .contains("8.8.8.8".parse().unwrap()));
+        assert!(TrustedProxy::parse("1.2.3.4/33").is_none());
+        assert!(TrustedProxy::parse("not-an-ip").is_none());
+
+        let defaults = TrustedProxies::parse(None);
+        assert!(defaults.trusts("127.0.0.1".parse().unwrap()));
+        assert!(defaults.trusts("172.17.0.1".parse().unwrap()));
+        assert!(defaults.trusts("192.168.1.10".parse().unwrap()));
+        assert!(!defaults.trusts("8.8.8.8".parse().unwrap()));
+        assert!(!TrustedProxies::parse(Some("none")).trusts("127.0.0.1".parse().unwrap()));
+        assert_eq!(TrustedProxies::parse(Some("*")), TrustedProxies::All);
+    }
+
+    #[test]
+    fn client_ip_only_trusts_forwarding_headers_from_trusted_proxies() {
+        let trusted = TrustedProxies::parse(None);
+
+        // A direct internet client cannot pick its own rate-limit key.
+        let direct = request_from("8.8.8.8:5000", &[("x-forwarded-for", "1.2.3.4")]);
+        assert_eq!(client_ip(&direct, &trusted), "8.8.8.8");
+
+        // Behind a local proxy: skip trusted hops from the right; a spoofed leftmost entry
+        // supplied by the client is ignored.
+        let proxied = request_from(
+            "127.0.0.1:5000",
+            &[("x-forwarded-for", "6.6.6.6, 1.2.3.4, 10.0.0.5")],
+        );
+        assert_eq!(client_ip(&proxied, &trusted), "1.2.3.4");
+
+        let real_ip = request_from("127.0.0.1:5000", &[("x-real-ip", "5.6.7.8")]);
+        assert_eq!(client_ip(&real_ip, &trusted), "5.6.7.8");
+
+        let bare = request_from("127.0.0.1:5000", &[]);
+        assert_eq!(client_ip(&bare, &trusted), "127.0.0.1");
+
+        let untrusting = TrustedProxies::parse(Some("none"));
+        assert_eq!(client_ip(&real_ip, &untrusting), "127.0.0.1");
+    }
+
+    #[test]
+    fn login_limiter_locks_ip_before_username() {
+        let mut limiter = LoginRateLimiter::new();
+        for _ in 0..LOGIN_MAX_FAILURES_PER_IP {
+            assert!(limiter.check("1.1.1.1", "admin").is_ok());
+            limiter.record_failure("1.1.1.1", "admin");
+        }
+        // The guessing IP is locked out, but the admin can still log in from elsewhere.
+        assert!(limiter.check("1.1.1.1", "admin").is_err());
+        assert!(limiter.check("2.2.2.2", "admin").is_ok());
+
+        // Only a distributed burst reaches the per-username limit.
+        for i in LOGIN_MAX_FAILURES_PER_IP..LOGIN_MAX_FAILURES_PER_USER {
+            limiter.record_failure(&format!("3.3.3.{}", i), "admin");
+        }
+        assert!(limiter.check("2.2.2.2", "admin").is_err());
+        assert!(limiter.check("2.2.2.2", "other").is_ok());
+
+        limiter.clear_success("2.2.2.2", "admin");
+        assert!(limiter.check("2.2.2.2", "admin").is_ok());
     }
 
     #[test]
@@ -4341,17 +4564,13 @@ async fn admin_login(
     }
 
     // Rate limiting: check IP and username-based limits
-    let client_ip = req
-        .connection_info()
-        .realip_remote_addr()
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = client_ip(&req, TrustedProxies::from_env());
     {
         let mut limiter = data
             .login_rate_limiter
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Err(reason) = limiter.check_and_record(&client_ip, &username) {
+        if let Err(reason) = limiter.check(&client_ip, &username) {
             log::warn!(
                 "[auth:login] rate-limited ip={} user={}: {}",
                 client_ip,

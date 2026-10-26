@@ -191,7 +191,7 @@ async function handleDeleteAccount(account) {
   color: var(--color-text);
 }
 .dark .page-title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 .settings-page {
@@ -234,8 +234,8 @@ async function handleDeleteAccount(account) {
 
 /* Settings card */
 .settings-card {
-  background: var(--color-surface-muted, #f7f7f8);
-  border: 1px solid var(--color-border, #ebebeb);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   overflow: hidden;
   margin-bottom: 20px;
@@ -244,8 +244,8 @@ async function handleDeleteAccount(account) {
   margin-bottom: 40px;
 }
 .dark .settings-card {
-  background: var(--color-surface, #18181b);
-  border-color: var(--color-surface-muted, #27272a);
+  background: var(--color-surface);
+  border-color: var(--color-surface-muted);
 }
 
 /* Settings row */
@@ -255,7 +255,7 @@ async function handleDeleteAccount(account) {
   justify-content: space-between;
   padding: 12px 16px;
   min-height: var(--size-control-lg);
-  border-bottom: 1px solid var(--color-border, #ebebeb);
+  border-bottom: 1px solid var(--color-border);
 }
 .settings-row:last-child {
   border-bottom: none;
@@ -281,7 +281,7 @@ async function handleDeleteAccount(account) {
   transform: scale(0.99);
 }
 .settings-row--interactive:active {
-  background: var(--color-surface-hover, #ececec);
+  background: var(--color-surface-hover);
 }
 .settings-row--stacked {
   align-items: stretch;
@@ -297,8 +297,8 @@ async function handleDeleteAccount(account) {
   gap: 10px;
 }
 .sr-icon--github {
-  background: #24292f;
-  color: #fff;
+  background: var(--color-github);
+  color: var(--color-white);
   font-size: 11px;
   font-weight: 700;
 }
@@ -318,7 +318,7 @@ async function handleDeleteAccount(account) {
 }
 .github-token__desc,
 .github-token__meta {
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -366,15 +366,15 @@ async function handleDeleteAccount(account) {
   color: var(--color-danger);
 }
 .dark .github-token__input {
-  background: var(--color-surface-muted, #27272a);
-  border-color: var(--color-surface-muted, #27272a);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface-muted);
+  border-color: var(--color-surface-muted);
+  color: var(--color-text);
 }
 .dark .settings-row {
-  border-bottom-color: var(--color-surface-muted, #27272a);
+  border-bottom-color: var(--color-surface-muted);
 }
 .dark .settings-row--interactive:active {
-  background: var(--color-surface, #27272a);
+  background: var(--color-surface);
 }
 
 /* Row left */
@@ -396,33 +396,33 @@ async function handleDeleteAccount(account) {
   flex-shrink: 0;
 }
 .sr-icon--apple {
-  background: var(--color-primary-soft, #ecfdf5);
+  background: var(--color-primary-soft);
 }
 .sr-icon--add {
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
   font-size: 18px;
   font-weight: 700;
 }
 .dark .sr-icon--add {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 .sr-icon--appearance {
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
 }
 .dark .sr-icon--appearance {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 .sr-icon--danger {
-  background: var(--color-danger-soft, #fef2f2);
+  background: var(--color-danger-soft);
 }
 .dark .sr-icon--danger {
-  background: rgba(239, 68, 68, 0.15);
+  background: rgba(var(--rgb-red), 0.15);
 }
 .sr-icon--neutral {
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
 }
 .dark .sr-icon--neutral {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 
 /* Label */
@@ -435,13 +435,13 @@ async function handleDeleteAccount(account) {
   flex-wrap: wrap;
 }
 .dark .sr-label {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .sr-label--brand {
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
 }
 .sr-label--danger {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
 }
 
 /* Account login time */
@@ -449,7 +449,7 @@ async function handleDeleteAccount(account) {
   font-size: var(--font-size-micro);
   font-weight: 500;
   white-space: nowrap;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
 }
 
 /* Row right */
@@ -461,21 +461,21 @@ async function handleDeleteAccount(account) {
   font-size: var(--font-size-body);
 }
 .dark .sr-right {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .sr-arrow {
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
 }
 .dark .sr-arrow {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 
 .dark .section-label {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .sr-icon--apple {
-  background: rgba(16, 163, 127, 0.15);
+  background: rgba(var(--rgb-brand), 0.15);
 }
 
 /* Account action buttons */
@@ -492,31 +492,31 @@ async function handleDeleteAccount(account) {
   transition: background 0.15s ease, opacity 0.15s ease;
   flex-shrink: 0;
   background: transparent;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .sr-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 .sr-btn--refresh:active:not(:disabled) {
-  background: var(--color-primary-soft, #ecfdf5);
-  color: var(--color-primary, #10a37f);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
 }
 .sr-btn--delete {
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .sr-btn--delete:active:not(:disabled) {
-  background: var(--color-danger-soft, #fef2f2);
-  color: var(--color-danger, #ef4444);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
 }
 .dark .sr-btn {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .dark .sr-btn--refresh:active:not(:disabled) {
-  background: rgba(16, 163, 127, 0.15);
+  background: rgba(var(--rgb-brand), 0.15);
 }
 .dark .sr-btn--delete:active:not(:disabled) {
-  background: rgba(239, 68, 68, 0.15);
+  background: rgba(var(--rgb-red), 0.15);
 }
 
 </style>

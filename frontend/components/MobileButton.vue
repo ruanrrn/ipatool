@@ -89,7 +89,7 @@ const handleClick = (e) => {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--color-border-default, #ebebeb);
+  border: 1px solid var(--color-border-default);
   border-radius: var(--radius-xl, 12px);
   font-family: var(--font-body);
   font-weight: 600;
@@ -147,33 +147,33 @@ const handleClick = (e) => {
 
 /* 类型变体 — Orbit v3 色板 */
 .mobile-button--default {
-  background: var(--color-bg-surface, #f7f7f8);
-  color: var(--color-text-primary, #0d0d0d);
-  border-color: var(--color-border-default, #ebebeb);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-default);
 }
 
 .mobile-button--primary {
-  background: var(--color-primary, #10a37f);
-  color: var(--color-text-inverse, #fff);
-  border-color: var(--color-primary, #10a37f);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+  border-color: var(--color-primary);
 }
 
 .mobile-button--success {
-  background: var(--color-primary, #10a37f);
-  color: var(--color-text-inverse, #fff);
-  border-color: var(--color-primary, #10a37f);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+  border-color: var(--color-primary);
 }
 
 .mobile-button--warning {
-  background: var(--color-warning, #f59e0b);
-  color: var(--color-text-inverse, #fff);
-  border-color: var(--color-warning, #f59e0b);
+  background: var(--color-warning);
+  color: var(--color-text-inverse);
+  border-color: var(--color-warning);
 }
 
 .mobile-button--danger {
-  background: var(--color-danger, #ef4444);
-  color: var(--color-text-inverse, #fff);
-  border-color: var(--color-danger, #ef4444);
+  background: var(--color-danger);
+  color: var(--color-text-inverse);
+  border-color: var(--color-danger);
 }
 
 /* 状态 */
@@ -192,23 +192,23 @@ const handleClick = (e) => {
 /* 悬停效果（仅桌面） */
 @media (hover: hover) and (pointer: fine) {
   .mobile-button--default:hover {
-    background: var(--color-bg-surface-hover, #ececec);
+    background: var(--color-bg-surface-hover);
   }
 
   .mobile-button--primary:hover {
-    background: var(--color-primary-hover, #0e8c6b);
+    background: var(--color-primary-hover);
   }
 
   .mobile-button--success:hover {
-    background: var(--color-primary-hover, #0e8c6b);
+    background: var(--color-primary-hover);
   }
 
   .mobile-button--warning:hover {
-    background: var(--color-warning-hover, #d97706);
+    background: var(--color-warning-hover);
   }
 
   .mobile-button--danger:hover {
-    background: var(--color-danger-hover, #dc2626);
+    background: var(--color-danger-hover);
   }
 }
 
@@ -274,29 +274,29 @@ const handleClick = (e) => {
 /* 深色模式 */
 :root.dark .mobile-button--default,
 .dark .mobile-button--default {
-  background: var(--color-surface-muted, #27272a);
-  color: var(--color-text, #f5f5f5);
-  border-color: var(--color-border, #3f3f46);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  border-color: var(--color-border);
 }
 
 :root.dark .mobile-button--default:hover,
 .dark .mobile-button--default:hover {
-  background: var(--color-surface-hover, #3f3f46);
+  background: var(--color-surface-hover);
 }
 
 :root.dark .mobile-button--primary:hover,
 .dark .mobile-button--primary:hover {
-  background: var(--color-primary-hover, #6ee7b7);
+  background: var(--color-primary-hover);
 }
 
 :root.dark .mobile-button--success:hover,
 .dark .mobile-button--success:hover {
-  background: var(--color-primary-hover, #6ee7b7);
+  background: var(--color-primary-hover);
 }
 
 :root.dark .mobile-button--default:active,
 .dark .mobile-button--default:active {
-  background: var(--color-surface-hover, #3f3f46);
+  background: var(--color-surface-hover);
 }
 
 /* 高对比度模式 */

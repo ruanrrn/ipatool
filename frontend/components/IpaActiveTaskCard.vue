@@ -25,7 +25,7 @@
       >
         <ProgressBar
           :percent="task.progress"
-          :color="task.stage === 'signing' ? 'var(--color-warning, #f59e0b)' : 'var(--color-primary, #10a37f)'"
+          :color="task.stage === 'signing' ? 'var(--color-warning)' : 'var(--color-primary)'"
           size="default"
         />
         <div class="queue-item__progress-info">
@@ -108,8 +108,8 @@ const formatFileSize = (bytes) => {
  align-items: center;
  gap: 12px;
  padding: 12px;
- background: var(--color-surface, #fff);
- border: 1px solid var(--color-border, #ebebeb);
+ background: var(--color-surface);
+ border: 1px solid var(--color-border);
  border-radius: var(--radius-xl);
  transition: opacity 0.2s ease;
 }
@@ -117,8 +117,8 @@ const formatFileSize = (bytes) => {
  opacity: 0.8;
 }
 .dark .queue-item {
- background: var(--color-surface, #18181b);
- border-color: var(--color-surface-muted, #27272a);
+ background: var(--color-surface);
+ border-color: var(--color-surface-muted);
 }
 
 /* Icon container — override AppArtwork sizing */
@@ -138,24 +138,24 @@ const formatFileSize = (bytes) => {
 .queue-item__name {
  font-size: var(--font-size-body);
  font-weight: 600;
- color: var(--color-text, #0d0d0d);
+ color: var(--color-text);
  white-space: nowrap;
  overflow: hidden;
  text-overflow: ellipsis;
 }
 .dark .queue-item__name {
- color: var(--color-text, #f5f5f5);
+ color: var(--color-text);
 }
 
 .queue-item__meta {
  display: flex;
  gap: 10px;
  font-size: var(--font-size-micro);
- color: var(--color-text-muted, #6e6e80);
+ color: var(--color-text-muted);
  margin-top: 2px;
 }
 .dark .queue-item__meta {
- color: var(--color-text-muted, #a1a1aa);
+ color: var(--color-text-muted);
 }
 
 /* Progress area */
@@ -167,17 +167,17 @@ const formatFileSize = (bytes) => {
  display: flex;
  justify-content: space-between;
  font-size: var(--font-size-nano);
- color: var(--color-text-muted, #6e6e80);
+ color: var(--color-text-muted);
  margin-top: 3px;
 }
 .dark .queue-item__progress-info {
- color: var(--color-text-muted, #a1a1aa);
+ color: var(--color-text-muted);
 }
 
 /* Error text */
 .queue-item__error {
  font-size: var(--font-size-micro);
- color: var(--color-danger, #ef4444);
+ color: var(--color-danger);
  margin-top: 4px;
 }
 
@@ -193,9 +193,9 @@ const formatFileSize = (bytes) => {
  width: 32px;
  height: 32px;
  border-radius: var(--radius-base);
- border: 1px solid var(--color-border, #ebebeb);
- background: var(--color-surface, #fff);
- color: var(--color-text-muted, #6e6e80);
+ border: 1px solid var(--color-border);
+ background: var(--color-surface);
+ color: var(--color-text-muted);
  font-size: var(--font-size-body);
  display: flex;
  align-items: center;
@@ -224,9 +224,9 @@ const formatFileSize = (bytes) => {
   }
 }
 .dark .q-btn {
- background: var(--color-surface, #18181b);
- border-color: var(--color-surface-muted, #27272a);
- color: var(--color-text-muted, #a1a1aa);
+ background: var(--color-surface);
+ border-color: var(--color-surface-muted);
+ color: var(--color-text-muted);
 }
 .q-btn:active {
   opacity: 0.7;
@@ -239,7 +239,7 @@ const formatFileSize = (bytes) => {
 }
 .dark .q-btn--pause {
   color: var(--color-warning);
-  border-color: rgba(245, 158, 11, 0.5);
-  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(var(--rgb-amber), 0.5);
+  background: rgba(var(--rgb-amber), 0.1);
 }
 </style>

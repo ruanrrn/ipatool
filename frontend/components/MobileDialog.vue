@@ -154,7 +154,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
 
-  background: var(--color-overlay-dialog, rgba(0, 0, 0, 0.5));
+  background: var(--color-overlay-dialog);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -162,9 +162,9 @@ onBeforeUnmount(() => {
   width: 100%;
   max-width: 320px;
   border: none;
-  box-shadow: var(--shadow-dialog, 0 20px 40px rgba(0, 0, 0, 0.15));
+  box-shadow: var(--shadow-dialog);
 
-  background: var(--color-surface, #fff);
+  background: var(--color-surface);
   overflow: hidden;
 }
 
@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
   font-family: var(--font-body);
   font-size: 17px;
   font-weight: 600;
-  color: var(--color-text-primary, #0d0d0d);
+  color: var(--color-text-primary);
   line-height: 1.3;
 }
 
@@ -212,7 +212,7 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: var(--radius-lg, 10px);
   background: transparent;
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
   cursor: pointer;
   font-size: 16px;
   display: flex;
@@ -241,12 +241,12 @@ onBeforeUnmount(() => {
 }
 
 .mobile-dialog__close:active {
-  color: var(--color-text-primary, #0d0d0d);
+  color: var(--color-text-primary);
 }
 
 .mobile-dialog__body {
   padding: 24px;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   font-size: 14px;
   line-height: 1.5;
 
@@ -339,34 +339,34 @@ onBeforeUnmount(() => {
 
 /* 深色模式 */
 .dark .mobile-dialog {
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(var(--rgb-black), 0.7);
 }
 
 .dark .mobile-dialog__panel {
-  background: var(--color-surface, #18181b);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  background: var(--color-surface);
+  box-shadow: 0 20px 40px rgba(var(--rgb-black), 0.5);
 }
 
 .dark .mobile-dialog__title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 .dark .mobile-dialog__body {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-dialog__close {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 
 .dark .mobile-dialog__close:active {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 /* 高对比度 */
 @media (prefers-contrast: high) {
   .mobile-dialog__panel {
-    border: 2px solid var(--color-border-default, #ebebeb);
+    border: 2px solid var(--color-border-default);
   }
 }
 

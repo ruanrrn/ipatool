@@ -205,6 +205,7 @@ server {
 | `BIND_ADDRESS` | — | 完整监听地址，如 `127.0.0.1:8080`，优先于 `PORT` |
 | `IPA_TOOL_PUBLIC_BASE_URL` | — | OTA / 下载链接使用的公网地址，如 `https://ipa.example.com` |
 | `FORCE_SECURE_COOKIE` | 自动 | `1` 始终为 Cookie 设置 `Secure`，`0` 从不设置；默认跟随请求协议 |
+| `TRUSTED_PROXIES` | 本机 + 内网网段 | 登录限流时信任其 `X-Forwarded-For` / `X-Real-IP` 的代理地址：逗号分隔的 IP/CIDR，`*` 表示全部，`none` 表示忽略这些请求头 |
 | `IPA_ADMIN_INITIAL_PASSWORD` | 随机 | 仅首次启动时使用的管理员密码 |
 | `DATABASE_PATH` | `data/ipa-webtool.db` | SQLite 数据库位置 |
 

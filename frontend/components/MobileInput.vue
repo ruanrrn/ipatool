@@ -255,11 +255,11 @@ defineExpose({
   gap: 2px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
 }
 
 .mobile-input__required {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
   font-weight: 600;
 }
 
@@ -270,39 +270,39 @@ defineExpose({
   gap: 8px;
   min-height: 48px;
   padding: 14px 12px;
-  background: var(--color-bg-surface, #f7f7f8);
-  border: 1px solid var(--color-border-default, #ebebeb);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
   border-radius: 12px;
   transition: all 0.2s ease;
 }
 
 .mobile-input__wrapper.is-focused {
-  background: var(--color-surface, #fff);
-  border: 2px solid var(--color-primary, #10a37f);
-  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.1);
+  background: var(--color-surface);
+  border: 2px solid var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-brand), 0.1);
 }
 
 .mobile-input__wrapper.has-error {
   background-color: var(--color-danger-soft);
   border: 1px solid var(--color-danger);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-red), 0.1);
 }
 
 .mobile-input__wrapper.has-error.is-focused {
   background-color: var(--color-danger-soft);
   border: 2px solid var(--color-danger);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-red), 0.1);
 }
 
 .mobile-input__wrapper.is-disabled {
-  background: var(--color-bg-page, #f0f0f0);
-  color: var(--color-text-disabled, #d1d5db);
+  background: var(--color-bg-page);
+  color: var(--color-text-disabled);
   cursor: not-allowed;
   opacity: 0.5;
 }
 
 .mobile-input__wrapper.is-readonly {
-  background: rgba(0, 0, 0, 0.02);
+  background: rgba(var(--rgb-black), 0.02);
   cursor: default;
 }
 
@@ -311,12 +311,12 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   font-size: 15px;
 }
 
 .mobile-input__wrapper.is-focused .mobile-input__prefix {
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
 }
 
 .mobile-input__field {
@@ -328,25 +328,25 @@ defineExpose({
   font-family: var(--font-body);
   /* 16px to prevent iOS Safari focus auto-zoom */
   font-size: 16px;
-  color: var(--color-text-primary, #0d0d0d);
+  color: var(--color-text-primary);
   line-height: 1.5;
   width: 100%;
 }
 
 .mobile-input__field::placeholder {
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
 }
 
 .mobile-input__field:disabled {
-  color: var(--color-text-disabled, #d1d5db);
+  color: var(--color-text-disabled);
   cursor: not-allowed;
 }
 
 .mobile-input__field:-webkit-autofill,
 .mobile-input__field:-webkit-autofill:hover,
 .mobile-input__field:-webkit-autofill:focus {
-  -webkit-text-fill-color: var(--color-text-primary, #0d0d0d);
-  -webkit-box-shadow: 0 0 0 48px var(--color-bg-surface, #f7f7f8) inset;
+  -webkit-text-fill-color: var(--color-text-primary);
+  -webkit-box-shadow: 0 0 0 48px var(--color-bg-surface) inset;
   transition: background-color 5000s ease-in-out 0s;
 }
 
@@ -379,10 +379,10 @@ defineExpose({
   min-width: 18px;
   min-height: 18px;
   padding: 0;
-  background: var(--color-border-subtle, #d1d5db);
+  background: var(--color-border-subtle);
   border: none;
   border-radius: 50%;
-  color: var(--color-text-inverse, #fff);
+  color: var(--color-text-inverse);
   cursor: pointer;
   transition: all 0.2s ease;
   flex-shrink: 0;
@@ -391,7 +391,7 @@ defineExpose({
 
 .mobile-input__clear:active {
   transform: scale(0.9);
-  background: var(--color-text-tertiary, #c0c0c0);
+  background: var(--color-text-tertiary);
 }
 
 /* 密码眼睛按钮 */
@@ -404,7 +404,7 @@ defineExpose({
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   cursor: pointer;
   transition: color 0.2s ease;
   flex-shrink: 0;
@@ -412,7 +412,7 @@ defineExpose({
 }
 
 .mobile-input__eye:active {
-  color: var(--color-text-primary, #0d0d0d);
+  color: var(--color-text-primary);
 }
 
 .mobile-input__eye svg {
@@ -428,79 +428,79 @@ defineExpose({
 }
 
 .mobile-input__error {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
 }
 
 .mobile-input__hint {
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
 }
 
 /* 深色模式 — .dark 在 <html> 上，scoped 会自动将属性加到末尾选择器 */
 .dark .mobile-input__wrapper {
-  background: var(--color-surface-muted, #27272a) !important;
-  border-color: var(--color-border, #3f3f46);
+  background: var(--color-surface-muted) !important;
+  border-color: var(--color-border);
 }
 
 .dark .mobile-input__wrapper.is-focused {
-  background: var(--color-surface, #18181b) !important;
-  border-color: var(--color-primary, #34d399);
-  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.15);
+  background: var(--color-surface) !important;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-brand), 0.15);
 }
 
 .dark .mobile-input__wrapper.has-error {
-  background-color: rgba(239, 68, 68, 0.1) !important;
-  border-color: var(--color-danger, #ef4444);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+  background-color: rgba(var(--rgb-red), 0.1) !important;
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-red), 0.15);
 }
 
 .dark .mobile-input__wrapper.has-error.is-focused {
-  background-color: rgba(239, 68, 68, 0.1) !important;
-  border-color: var(--color-danger, #ef4444);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+  background-color: rgba(var(--rgb-red), 0.1) !important;
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-red), 0.15);
 }
 
 .dark .mobile-input__wrapper.is-disabled {
-  background: var(--color-bg, #09090b) !important;
+  background: var(--color-bg) !important;
 }
 
 .dark .mobile-input__wrapper.is-readonly {
-  background: rgba(255, 255, 255, 0.01) !important;
+  background: rgba(var(--rgb-white), 0.01) !important;
 }
 
 .dark .mobile-input__field {
-  color: var(--color-text, #f5f5f5) !important;
+  color: var(--color-text) !important;
 }
 
 .dark .mobile-input__field::placeholder {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 
 .dark .mobile-input__field:-webkit-autofill,
 .dark .mobile-input__field:-webkit-autofill:hover,
 .dark .mobile-input__field:-webkit-autofill:focus {
-  -webkit-box-shadow: 0 0 0 48px var(--color-surface, #18181b) inset;
+  -webkit-box-shadow: 0 0 0 48px var(--color-surface) inset;
 }
 
 .dark .mobile-input__clear {
-  background: var(--color-border-strong, #52525b);
-  color: var(--color-text-inverse, #0d0d0d);
+  background: var(--color-border-strong);
+  color: var(--color-text-inverse);
 }
 
 .dark .mobile-input__eye {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-input__label {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-input__prefix,
 .dark .mobile-input__suffix {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-input__hint {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 
 /* 高对比度模式 */
