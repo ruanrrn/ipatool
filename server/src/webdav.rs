@@ -8,8 +8,30 @@
 //! 下载完成后由 download_manager 调用 `upload_file` 把 IPA 推到远端。
 
 use std::path::Path;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
+
+/// Timeout for small WebDAV requests (PROPFIND / MKCOL).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Base timeout for uploads; `upload_timeout` adds time proportional to the file size.
+const UPLOAD_BASE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Slowest sustained upload rate tolerated before an upload is considered stalled.
+const UPLOAD_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
+const UPLOAD_READ_CHUNK: usize = 256 * 1024;
+
+thread_local! {
+    // Actix runs one single-threaded runtime per worker; a per-thread client reuses pooled
+    // connections without driving them from another worker's runtime.
+    static HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+}
+
+fn upload_timeout(file_size: u64) -> Duration {
+    UPLOAD_BASE_TIMEOUT + Duration::from_secs(file_size / UPLOAD_MIN_BYTES_PER_SEC)
+}
 
 /// WebDAV 上传配置（从数据库 WebDAVConfig 映射而来）。
 #[derive(Debug, Clone)]
@@ -23,11 +45,9 @@ pub struct WebDAVTarget {
 impl WebDAVTarget {
     /// 构建带 Basic Auth 的 reqwest RequestBuilder。
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .expect("reqwest client build failed");
-        let mut req = client.request(method, url);
+        let mut req = HTTP_CLIENT
+            .with(|client| client.request(method, url))
+            .timeout(REQUEST_TIMEOUT);
         if !self.username.is_empty() {
             req = req.basic_auth(&self.username, Some(&self.password));
         }
@@ -135,8 +155,8 @@ pub async fn upload_file(target: &WebDAVTarget, local_path: &Path) -> Result<Str
         }
     }
 
-    // 2. 读取文件内容
-    let mut file = fs::File::open(local_path)
+    // 2. 以流的方式读取文件：多 GB 的 IPA 不应整体读入内存。
+    let file = fs::File::open(local_path)
         .await
         .map_err(|e| WebDAVError(format!("无法读取本地文件: {}", e)))?;
     let metadata = file
@@ -144,11 +164,15 @@ pub async fn upload_file(target: &WebDAVTarget, local_path: &Path) -> Result<Str
         .await
         .map_err(|e| WebDAVError(format!("无法获取文件信息: {}", e)))?;
     let file_size = metadata.len();
-    let mut buffer = Vec::with_capacity(file_size as usize);
-    file.read_to_end(&mut buffer)
-        .await
-        .map_err(|e| WebDAVError(format!("读取文件内容失败: {}", e)))?;
-    drop(file);
+    let body_stream = futures_util::stream::try_unfold(file, |mut file| async move {
+        let mut buffer = vec![0u8; UPLOAD_READ_CHUNK];
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok::<_, std::io::Error>(None);
+        }
+        buffer.truncate(read);
+        Ok(Some((bytes::Bytes::from(buffer), file)))
+    });
 
     // 3. PUT 上传
     let file_url = target.file_url(filename);
@@ -161,9 +185,10 @@ pub async fn upload_file(target: &WebDAVTarget, local_path: &Path) -> Result<Str
 
     let resp = target
         .request(reqwest::Method::PUT, &file_url)
+        .timeout(upload_timeout(file_size))
         .header("Content-Type", "application/octet-stream")
         .header("Content-Length", file_size)
-        .body(buffer)
+        .body(reqwest::Body::wrap_stream(body_stream))
         .send()
         .await
         .map_err(|e| WebDAVError(format!("上传请求失败: {}", e)))?;
@@ -463,5 +488,63 @@ mod tests {
         assert!(!entries[2].is_dir);
         assert_eq!(entries[2].name, "app.ipa");
         assert_eq!(entries[2].path, "app.ipa");
+    }
+
+    #[tokio::test]
+    async fn upload_streams_file_with_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let content = (0..300_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let path = std::env::temp_dir().join(format!("webdav-upload-{}.ipa", std::process::id()));
+        std::fs::write(&path, &content).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 64 * 1024];
+            let header_end = loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "connection closed before headers");
+                received.extend_from_slice(&buffer[..read]);
+                if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&received[..header_end]).to_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse::<usize>().unwrap())
+                .expect("Content-Length header");
+            while received.len() < header_end + length {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "connection closed before body");
+                received.extend_from_slice(&buffer[..read]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            (headers, received[header_end..].to_vec())
+        });
+
+        let target = WebDAVTarget {
+            url: format!("http://{}", address),
+            username: String::new(),
+            password: String::new(),
+            remote_path: "/".to_string(),
+        };
+        let remote_url = upload_file(&target, &path).await.unwrap();
+        let (headers, body) = server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(remote_url.ends_with(".ipa"));
+        assert!(headers.starts_with("put "));
+        assert!(!headers.contains("transfer-encoding: chunked"));
+        assert_eq!(body, content);
     }
 }

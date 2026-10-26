@@ -24,7 +24,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         run: cargo test
 
@@ -50,6 +50,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm run lint
       - name: Purchase status regressions
         run: node --test frontend/tests/purchase-status.test.mjs
       - run: pnpm run build

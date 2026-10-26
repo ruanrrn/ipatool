@@ -139,6 +139,10 @@ impl Database {
             row.get::<_, String>(0)
         });
         let _ = connection.query_row("PRAGMA foreign_keys = ON", [], |row| row.get::<_, i32>(0));
+        // WAL + NORMAL is crash-safe (no corruption) and avoids an fsync on every commit; the
+        // busy timeout covers external tools (sqlite3 CLI, reset-admin-password) holding a lock.
+        let _ = connection.execute_batch("PRAGMA synchronous = NORMAL;");
+        let _ = connection.busy_timeout(std::time::Duration::from_secs(5));
 
         Self::create_tables(&connection)?;
         Self::migrate_tables(&connection)?;
@@ -860,7 +864,20 @@ impl Database {
 
                 new_name.to_string()
             }
-            None => username.to_string(),
+            None => {
+                // A password change must log out every other session (e.g. a stolen cookie);
+                // only the session performing the change survives.
+                match session_token {
+                    Some(token) => tx.execute(
+                        "DELETE FROM sessions WHERE username = ? AND token != ?",
+                        params![username, token],
+                    )?,
+                    None => {
+                        tx.execute("DELETE FROM sessions WHERE username = ?", params![username])?
+                    }
+                };
+                username.to_string()
+            }
         };
 
         tx.commit()?;
@@ -886,13 +903,12 @@ impl Database {
     }
 
     pub fn get_session(&self, token: &str) -> Result<Option<SessionRecord>> {
+        // Runs on every authenticated request: read-only (expired rows are filtered here and
+        // purged by `cleanup_expired_sessions` on login) and with a cached statement.
         let conn = self.connection.lock().unwrap();
-        conn.execute(
-            "DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP",
-            [],
+        let mut stmt = conn.prepare_cached(
+            "SELECT * FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP",
         )?;
-        let mut stmt = conn
-            .prepare("SELECT * FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP")?;
         let session = stmt
             .query_row(params![token], |row| {
                 Ok(SessionRecord {
@@ -2322,6 +2338,46 @@ mod tests {
         let current_session = db.get_session("current-session").unwrap().unwrap();
         assert_eq!(current_session.username, "owner");
         assert!(db.get_session("old-session").unwrap().is_none());
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn change_password_without_rename_revokes_other_sessions_only() {
+        let db_path = temp_db_path("admin-change-password-revoke");
+        let db = Database::new(db_path.to_str().unwrap()).unwrap();
+
+        db.create_session("current-session", "admin", "2999-01-01 00:00:00")
+            .unwrap();
+        db.create_session("stolen-session", "admin", "2999-01-01 00:00:00")
+            .unwrap();
+
+        let final_username = db
+            .change_password_and_rename(
+                "admin",
+                &Database::hash_password("new-secure-password"),
+                false,
+                None,
+                Some("current-session"),
+            )
+            .unwrap();
+
+        assert_eq!(final_username, "admin");
+        assert!(db.get_session("current-session").unwrap().is_some());
+        assert!(db.get_session("stolen-session").unwrap().is_none());
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn get_session_ignores_expired_sessions() {
+        let db_path = temp_db_path("admin-session-expired");
+        let db = Database::new(db_path.to_str().unwrap()).unwrap();
+
+        db.create_session("expired", "admin", "2000-01-01 00:00:00")
+            .unwrap();
+        assert!(db.get_session("expired").unwrap().is_none());
+        assert_eq!(db.cleanup_expired_sessions().unwrap(), 1);
 
         let _ = fs::remove_file(db_path);
     }

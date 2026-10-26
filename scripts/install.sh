@@ -210,7 +210,7 @@ do_install() {
     if $was_installed; then
         log_info "Upgrade detected — preserving existing data."
     else
-        admin_password=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
+        admin_password=$(tr -dc 'A-Za-z0-9!@#^&*' < /dev/urandom | head -c 16)  # no '%': systemd unit specifier
         echo "${admin_password}" > "${INSTALL_DIR}/.initial_password"
         chmod 600 "${INSTALL_DIR}/.initial_password"
     fi
@@ -341,10 +341,11 @@ do_reset_password() {
     echo ""
 
     local new_password
-    new_password=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
+    new_password=$(tr -dc 'A-Za-z0-9!@#^&*' < /dev/urandom | head -c 16)
 
     log_step "Resetting admin password..."
-    if printf '%s' "$new_password" | "$server_bin" reset-admin-password --username admin --password-stdin 2>/dev/null; then
+    # IPA_TOOL_ROOT: the binary otherwise resolves data/ relative to the caller's working directory.
+    if printf '%s' "$new_password" | IPA_TOOL_ROOT="${INSTALL_DIR}" "$server_bin" reset-admin-password --username admin --password-stdin; then
         echo "${new_password}" > "${INSTALL_DIR}/.initial_password"
         chmod 600 "${INSTALL_DIR}/.initial_password"
         echo ""

@@ -190,9 +190,23 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
+
+`X-Forwarded-Proto` lets the backend generate `https://` OTA links and mark the login cookie `Secure`.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | Listen port (binds `0.0.0.0:$PORT`) |
+| `BIND_ADDRESS` | — | Full listen address, e.g. `127.0.0.1:8080`; overrides `PORT` |
+| `IPA_TOOL_PUBLIC_BASE_URL` | — | Public origin used in OTA/download links, e.g. `https://ipa.example.com` |
+| `FORCE_SECURE_COOKIE` | auto | `1` always sets the `Secure` cookie flag, `0` never; by default it follows the request scheme |
+| `IPA_ADMIN_INITIAL_PASSWORD` | random | Admin password used on first start only |
+| `DATABASE_PATH` | `data/ipa-webtool.db` | SQLite database location |
 
 ## Tech Stack
 

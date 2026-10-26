@@ -85,19 +85,6 @@ pub struct ConfirmPurchaseRequest {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
-#[allow(non_snake_case)]
-pub struct DownloadRequest {
-    pub token: String,
-    pub url: String,
-    pub appid: Option<String>,
-    pub appVerId: Option<String>,
-    pub downloadPath: Option<String>,
-    #[serde(default)]
-    pub autoPurchase: bool,
-}
-
-#[derive(Deserialize)]
 #[allow(non_snake_case)]
 pub struct StartDownloadDirectRequest {
     pub token: String,
@@ -315,44 +302,37 @@ pub fn session_expires_at() -> String {
         .to_string()
 }
 
-/// Detect whether the server is running behind HTTPS (reverse proxy).
-/// Checks `FORCE_SECURE_COOKIE` env var; if unset, also checks common reverse-proxy headers.
-fn is_https_environment() -> bool {
-    if std::env::var("FORCE_SECURE_COOKIE")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
-    {
-        return true;
+/// Decide whether the admin session cookie gets the `Secure` attribute.
+///
+/// `FORCE_SECURE_COOKIE=1|true` / `0|false` force the choice. Otherwise it follows the request
+/// scheme (honouring `X-Forwarded-Proto` from a TLS-terminating proxy): browsers refuse to store
+/// `Secure` cookies sent over plain HTTP, so always setting it broke logins on
+/// `http://<lan-ip>:8080` deployments.
+pub fn should_use_secure_cookie(request_is_https: bool) -> bool {
+    match std::env::var("FORCE_SECURE_COOKIE").as_deref() {
+        Ok("1") | Ok("true") => true,
+        Ok("0") | Ok("false") => false,
+        _ => request_is_https,
     }
-    // In production, the reverse proxy (nginx/Caddy) typically sets X-Forwarded-Proto.
-    // Since we can't read headers at cookie-build time, default to secure=true
-    // and let the deployer set FORCE_SECURE_COOKIE=0 for plain-HTTP dev setups.
-    std::env::var("FORCE_SECURE_COOKIE")
-        .map(|v| v == "0" || v == "false")
-        .is_err()
 }
 
-pub fn build_session_cookie(token: &str) -> Cookie<'static> {
-    let mut builder = Cookie::build(ADMIN_SESSION_COOKIE, token.to_string())
+pub fn build_session_cookie(token: &str, secure: bool) -> Cookie<'static> {
+    Cookie::build(ADMIN_SESSION_COOKIE, token.to_string())
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .max_age(CookieDuration::days(SESSION_TTL_DAYS));
-    if is_https_environment() {
-        builder = builder.secure(true);
-    }
-    builder.finish()
+        .max_age(CookieDuration::days(SESSION_TTL_DAYS))
+        .secure(secure)
+        .finish()
 }
 
-pub fn clear_session_cookie() -> Cookie<'static> {
-    let mut builder = Cookie::build(ADMIN_SESSION_COOKIE, "")
+pub fn clear_session_cookie(secure: bool) -> Cookie<'static> {
+    let mut cookie = Cookie::build(ADMIN_SESSION_COOKIE, "")
         .path("/")
         .http_only(true)
-        .same_site(SameSite::Lax);
-    if is_https_environment() {
-        builder = builder.secure(true);
-    }
-    let mut cookie = builder.finish();
+        .same_site(SameSite::Lax)
+        .secure(secure)
+        .finish();
     cookie.make_removal();
     cookie
 }

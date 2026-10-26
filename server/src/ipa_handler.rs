@@ -7,12 +7,14 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::{self};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 const CHUNK_SIZE: usize = 5 * 1024 * 1024;
 const MAX_RETRIES: usize = 5;
 const RETRY_DELAY: u64 = 3000;
 const MAX_CONCURRENT_CHUNKS: usize = 8;
+/// Upper bound for one ranged request (5 MB chunk), i.e. a ~17 KB/s floor before retrying.
+const CHUNK_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
     let value = value.trim().strip_prefix("bytes ")?;
@@ -172,30 +174,41 @@ pub fn get_license_error_message(result: &std::collections::HashMap<String, Valu
 }
 
 async fn download_chunk(
+    client: &reqwest::Client,
     url: &str,
     start: u64,
     end: u64,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
     let expected_len = end
         .checked_sub(start)
         .and_then(|value| value.checked_add(1))
         .ok_or("无效的分块范围")?;
 
+    let mut last_error: Box<dyn std::error::Error + Send + Sync> = "下载重试次数耗尽".into();
     for attempt in 0..MAX_RETRIES {
-        let response = client
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(RETRY_DELAY * attempt as u64)).await;
+        }
+
+        // Transport errors (reset, timeout, truncated body) are retried like a bad status: with
+        // hundreds of chunks per IPA a single transient failure must not abort the whole job.
+        let response = match client
             .get(url)
             .header("Range", format!("bytes={}-{}", start, end))
             .send()
-            .await?;
-
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            if attempt < MAX_RETRIES - 1 {
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAY * (attempt as u64 + 1))).await;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = format!("分块请求失败: {}", error).into();
                 continue;
             }
-            return Err(format!("无法获取区块: 期望 206，实际 {}", response.status()).into());
+        };
+
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            last_error = format!("无法获取区块: 期望 206，实际 {}", response.status()).into();
+            continue;
         }
 
         let content_range = response
@@ -233,14 +246,21 @@ async fn download_chunk(
             }
         }
 
-        let bytes = response.bytes().await?;
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                last_error = format!("分块读取失败: {}", error).into();
+                continue;
+            }
+        };
         if bytes.len() as u64 != expected_len {
-            return Err(format!(
+            last_error = format!(
                 "分块大小不匹配: 期望 {}，实际 {}",
                 expected_len,
                 bytes.len()
             )
-            .into());
+            .into();
+            continue;
         }
 
         let mut file = fs::OpenOptions::new()
@@ -251,11 +271,12 @@ async fn download_chunk(
             .await?;
 
         file.write_all(&bytes).await?;
+        file.flush().await?;
 
         return Ok(());
     }
 
-    Err("下载重试次数耗尽".into())
+    Err(last_error)
 }
 
 fn get_artwork_from_map(metadata: &serde_json::Map<String, Value>) -> String {
@@ -572,19 +593,90 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
         },
     );
     let output_file_path = download_dir.join(output_file_name);
+    // Chunks are merged and patched in a sibling ".partial" file that is only renamed to the
+    // final .ipa name once packaging succeeded, so a failed run never leaves a broken IPA that
+    // the artifact scanner would later list as a completed download.
+    let partial_file_path = output_file_path.with_extension("ipa.partial");
     let cache_dir = create_download_cache_dir(download_dir).await?;
 
-    let response = reqwest::Client::new().get(file_url).send().await?;
+    let outcome = fetch_and_package(
+        &params,
+        file_url,
+        song_list_value,
+        &cache_dir,
+        &partial_file_path,
+        &output_file_path,
+    )
+    .await;
+
+    let _ = fs::remove_dir_all(&cache_dir).await;
+    let downloaded = match outcome {
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            let _ = fs::remove_file(&partial_file_path).await;
+            return Err(error);
+        }
+    };
+
+    let metadata_info = DownloadMetadata {
+        bundle_display_name: bundle_display_name.to_string(),
+        bundle_short_version_string: bundle_short_version.to_string(),
+        bundle_id: bundle_id.to_string(),
+        artwork_url: get_artwork_from_map(metadata),
+        artist_name: metadata
+            .get("artistName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+
+    params.on_progress(DownloadProgress {
+        phase: "done".to_string(),
+        message: format!("[done] 产物：{}", output_file_path.to_string_lossy()),
+        progress: Some(100.0),
+        file_size: Some(downloaded),
+        downloaded: Some(downloaded),
+    });
+
+    Ok(DownloadResult {
+        ok: true,
+        file: Some(output_file_path.to_string_lossy().into_owned()),
+        metadata: Some(metadata_info),
+        error: None,
+        needs_reauth: false,
+        needs_purchase: false,
+    })
+}
+
+/// Download `file_url` in parallel ranged chunks, merge them into `partial_file_path`, inject
+/// metadata/sinfs and finally move the result to `output_file_path`. Returns the byte count.
+async fn fetch_and_package<S: AppleAuthService>(
+    params: &DownloadParams<'_, S>,
+    file_url: &str,
+    song_list_value: &Value,
+    cache_dir: &Path,
+    partial_file_path: &Path,
+    output_file_path: &Path,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    // One client per download: chunk requests reuse pooled keep-alive connections instead of
+    // paying a TLS handshake per 5 MB chunk, and stalled connections are bounded by timeouts.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(CHUNK_REQUEST_TIMEOUT)
+        .build()?;
+
+    let response = client.get(file_url).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("无法获取文件: {}", response.status()).into());
     }
 
     let file_size = response.content_length().unwrap_or(0);
+    drop(response);
     if file_size == 0 {
         return Err("文件大小为 0，下载失败".into());
     }
-    let num_chunks = (file_size as f64 / CHUNK_SIZE as f64).ceil() as usize;
+    let num_chunks = file_size.div_ceil(CHUNK_SIZE as u64) as usize;
 
     params.on_progress(DownloadProgress {
         phase: "download-start".to_string(),
@@ -599,48 +691,38 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
     });
 
     let downloaded_total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let file_size_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(file_size));
     let progress_callback = params.progress_callback.clone();
 
     use futures::stream::{self, StreamExt};
     let mut chunk_stream = stream::iter(0..num_chunks)
         .map(|i| {
-            let url = file_url.to_string();
-            let cache_dir = cache_dir.clone();
+            let client = client.clone();
             let downloaded_total = downloaded_total.clone();
-            let file_size_atomic = file_size_atomic.clone();
             let progress_callback = progress_callback.clone();
 
             async move {
                 let start = (i * CHUNK_SIZE) as u64;
-                let end = std::cmp::min(
-                    start + CHUNK_SIZE as u64 - 1,
-                    file_size_atomic.load(std::sync::atomic::Ordering::Relaxed) - 1,
-                );
+                let end = std::cmp::min(start + CHUNK_SIZE as u64 - 1, file_size - 1);
                 let temp_output = cache_dir.join(format!("part{}", i));
 
-                download_chunk(&url, start, end, &temp_output).await?;
+                download_chunk(&client, file_url, start, end, &temp_output).await?;
 
-                let chunk_bytes = std::cmp::min(
-                    CHUNK_SIZE as u64,
-                    file_size_atomic.load(std::sync::atomic::Ordering::Relaxed) - start,
-                );
+                let chunk_bytes = end - start + 1;
                 let prev =
                     downloaded_total.fetch_add(chunk_bytes, std::sync::atomic::Ordering::Relaxed);
                 let current = prev + chunk_bytes;
 
                 if let Some(callback) = &progress_callback {
-                    let total = file_size_atomic.load(std::sync::atomic::Ordering::Relaxed);
-                    let percent = ((current as f64 / total as f64) * 100.0).min(100.0);
+                    let percent = ((current as f64 / file_size as f64) * 100.0).min(100.0);
                     callback(DownloadProgress {
                         phase: "download-progress".to_string(),
                         message: format!(
                             "[download] 进度 {:.2}MB / {:.2}MB",
                             current as f64 / 1024.0 / 1024.0,
-                            total as f64 / 1024.0 / 1024.0
+                            file_size as f64 / 1024.0 / 1024.0
                         ),
                         progress: Some(percent),
-                        file_size: Some(total),
+                        file_size: Some(file_size),
                         downloaded: Some(current),
                     });
                 }
@@ -653,6 +735,7 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
     while let Some(result) = chunk_stream.next().await {
         result.map_err(|e| format!("分块下载失败: {}", e))?;
     }
+    drop(chunk_stream);
 
     let downloaded = downloaded_total.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -664,44 +747,14 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
         downloaded: None,
     });
 
-    let mut final_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&output_file_path)
-        .await?;
-
-    for i in 0..num_chunks {
-        let temp_output = cache_dir.join(format!("part{}", i));
-        let expected_chunk_size =
-            std::cmp::min(CHUNK_SIZE as u64, file_size - (i * CHUNK_SIZE) as u64);
-        let part_metadata = fs::metadata(&temp_output).await?;
-        if part_metadata.len() != expected_chunk_size {
-            return Err(format!(
-                "分块文件大小不匹配: part{} 期望 {}，实际 {}",
-                i,
-                expected_chunk_size,
-                part_metadata.len()
-            )
-            .into());
-        }
-
-        let mut temp_file = fs::File::open(&temp_output).await?;
-        let mut buffer = Vec::new();
-        temp_file.read_to_end(&mut buffer).await?;
-        final_file.write_all(&buffer).await?;
-        fs::remove_file(&temp_output).await?;
-    }
-    final_file.flush().await?;
-    drop(final_file);
-
-    let merged_size = fs::metadata(&output_file_path).await?.len();
-    if merged_size != file_size {
-        return Err(format!(
-            "合并文件大小不匹配: 期望 {}，实际 {}",
-            file_size, merged_size
-        )
-        .into());
+    {
+        let cache_dir = cache_dir.to_path_buf();
+        let partial_file_path = partial_file_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            merge_chunks(&cache_dir, &partial_file_path, num_chunks, file_size)
+        })
+        .await
+        .map_err(|e| format!("合并分块任务异常: {}", e))??;
     }
 
     params.on_progress(DownloadProgress {
@@ -712,11 +765,23 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
         downloaded: None,
     });
 
-    let mut signature_client = SignatureClient::new(song_list_value, params.email)?;
-    signature_client.load_file(&output_file_path.to_string_lossy())?;
-    signature_client.append_metadata();
-    let signature_result = signature_client.append_signatures()?;
-    signature_client.write()?;
+    // ZIP rewriting is blocking file IO + CPU; keep it off the async worker so other requests
+    // served by the same worker are not stalled for the duration of a multi-GB rewrite.
+    let signature_result = {
+        let song_list_value = song_list_value.clone();
+        let email = params.email.to_string();
+        let partial_file_path = partial_file_path.to_string_lossy().into_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut signature_client = SignatureClient::new(&song_list_value, &email)?;
+            signature_client.load_file(&partial_file_path)?;
+            signature_client.append_metadata();
+            let signature_result = signature_client.append_signatures()?;
+            signature_client.write()?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(signature_result)
+        })
+        .await
+        .map_err(|e| format!("注入签名任务异常: {}", e))??
+    };
 
     if !signature_result.applied_paths.is_empty() {
         params.on_progress(DownloadProgress {
@@ -753,36 +818,50 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
         downloaded: None,
     });
 
-    fs::remove_dir_all(&cache_dir).await?;
+    fs::rename(partial_file_path, output_file_path).await?;
+    Ok(downloaded)
+}
 
-    let metadata_info = DownloadMetadata {
-        bundle_display_name: bundle_display_name.to_string(),
-        bundle_short_version_string: bundle_short_version.to_string(),
-        bundle_id: bundle_id.to_string(),
-        artwork_url: get_artwork_from_map(metadata),
-        artist_name: metadata
-            .get("artistName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    };
+/// Concatenate the downloaded part files into `output`, verifying every part and the final size.
+/// `std::io::copy` between files uses `copy_file_range` on Linux, so no data passes through
+/// user space.
+fn merge_chunks(
+    cache_dir: &Path,
+    output: &Path,
+    num_chunks: usize,
+    file_size: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut final_file = std::fs::File::create(output)?;
 
-    params.on_progress(DownloadProgress {
-        phase: "done".to_string(),
-        message: format!("[done] 产物：{}", output_file_path.to_string_lossy()),
-        progress: Some(100.0),
-        file_size: Some(file_size),
-        downloaded: Some(downloaded),
-    });
+    for i in 0..num_chunks {
+        let temp_output = cache_dir.join(format!("part{}", i));
+        let expected_chunk_size =
+            std::cmp::min(CHUNK_SIZE as u64, file_size - (i * CHUNK_SIZE) as u64);
+        let mut part = std::fs::File::open(&temp_output)?;
+        let part_size = part.metadata()?.len();
+        if part_size != expected_chunk_size {
+            return Err(format!(
+                "分块文件大小不匹配: part{} 期望 {}，实际 {}",
+                i, expected_chunk_size, part_size
+            )
+            .into());
+        }
+        std::io::copy(&mut part, &mut final_file)?;
+        drop(part);
+        std::fs::remove_file(&temp_output)?;
+    }
+    final_file.sync_all()?;
+    drop(final_file);
 
-    Ok(DownloadResult {
-        ok: true,
-        file: Some(output_file_path.to_string_lossy().into_owned()),
-        metadata: Some(metadata_info),
-        error: None,
-        needs_reauth: false,
-        needs_purchase: false,
-    })
+    let merged_size = std::fs::metadata(output)?.len();
+    if merged_size != file_size {
+        return Err(format!(
+            "合并文件大小不匹配: 期望 {}，实际 {}",
+            file_size, merged_size
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -845,5 +924,308 @@ impl AppleAuthService for AccountStore {
     ) -> Result<std::collections::HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>>
     {
         AccountStore::ensure_license(self, app_identifier, app_ver_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use std::collections::HashMap;
+    use std::io::{Cursor, Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+
+    struct SongListStore {
+        song: Value,
+    }
+
+    #[async_trait::async_trait]
+    impl AppleAuthService for SongListStore {
+        async fn download_product(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &AuthInfo,
+        ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(HashMap::from([
+                ("_state".to_string(), Value::String("success".to_string())),
+                (
+                    "songList".to_string(),
+                    Value::Array(vec![self.song.clone()]),
+                ),
+            ]))
+        }
+
+        async fn ensure_license(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &AuthInfo,
+        ) -> Result<HashMap<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+            unreachable!("download succeeds without purchase")
+        }
+    }
+
+    fn sample_ipa(binary: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut zip = zip::ZipWriter::new(Cursor::new(&mut out));
+        let stored: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let plist = |entries: Vec<(&str, plist::Value)>| {
+            let mut dict = plist::Dictionary::new();
+            for (key, value) in entries {
+                dict.insert(key.to_string(), value);
+            }
+            let mut bytes = Vec::new();
+            plist::to_writer_xml(&mut bytes, &plist::Value::Dictionary(dict)).unwrap();
+            bytes
+        };
+        zip.add_directory("Payload/Test.app/", stored).unwrap();
+        zip.start_file("Payload/Test.app/Info.plist", stored)
+            .unwrap();
+        zip.write_all(&plist(vec![(
+            "CFBundleExecutable",
+            plist::Value::String("Test".into()),
+        )]))
+        .unwrap();
+        zip.start_file("Payload/Test.app/SC_Info/Manifest.plist", stored)
+            .unwrap();
+        zip.write_all(&plist(vec![(
+            "SinfPaths",
+            plist::Value::Array(vec![plist::Value::String("SC_Info/Test.sinf".into())]),
+        )]))
+        .unwrap();
+        zip.start_file("Payload/Test.app/Test", stored).unwrap();
+        zip.write_all(binary).unwrap();
+        zip.finish().unwrap();
+        out
+    }
+
+    /// Minimal HTTP/1.1 server with Range support. `respond` may override the response for a
+    /// given (request index, range); every connection is closed after one response.
+    async fn serve_file<F>(body: Arc<Vec<u8>>, respond: F) -> String
+    where
+        F: Fn(usize, Option<(u64, u64)>) -> Option<String> + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let respond = Arc::new(respond);
+        let counter = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                let respond = respond.clone();
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let read = socket.read(&mut buffer).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    let request = String::from_utf8_lossy(&request).to_lowercase();
+                    let range = request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("range: bytes="))
+                        .and_then(|value| value.trim().split_once('-'))
+                        .and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)));
+                    let (head, payload): (String, &[u8]) = match respond(index, range) {
+                        Some(head) => (head, &[]),
+                        None => match range {
+                            Some((start, end)) => (
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    start,
+                                    end,
+                                    body.len(),
+                                    end - start + 1
+                                ),
+                                &body[start as usize..=end as usize],
+                            ),
+                            None => (
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    body.len()
+                                ),
+                                &body[..],
+                            ),
+                        },
+                    };
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(payload).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        format!("http://{}/app.ipa", address)
+    }
+
+    fn song_for(url: &str) -> Value {
+        serde_json::json!({
+            "URL": url,
+            "metadata": {
+                "bundleDisplayName": "Test",
+                "bundleShortVersionString": "1.2.3",
+                "bundleId": "com.example.test",
+                "artistName": "Tester"
+            },
+            "sinfs": [{
+                "id": 0,
+                "sinf": base64::engine::general_purpose::STANDARD.encode(b"main-sinf")
+            }]
+        })
+    }
+
+    fn temp_download_dir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{}-{}-{}",
+            prefix,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn leftover_files(dir: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    names.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn download_merges_chunks_retries_and_injects_signatures() {
+        // > 2 chunks of incompressible data so ranged downloads and merging are exercised.
+        let mut binary = vec![0u8; CHUNK_SIZE * 2 + 12345];
+        let mut seed = 0x2545_f491_u32;
+        for byte in binary.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (seed >> 24) as u8;
+        }
+        let ipa = Arc::new(sample_ipa(&binary));
+        // The first ranged request fails once; the chunk must be retried, not fail the job.
+        let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let url = serve_file(ipa.clone(), move |_, range| {
+            (range.is_some() && !failed_once.swap(true, Ordering::SeqCst)).then(|| {
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            })
+        })
+        .await;
+
+        let dir = temp_download_dir("ipa-download-ok");
+        let download_path = dir.to_string_lossy().into_owned();
+        let store = SongListStore {
+            song: song_for(&url),
+        };
+        let max_percent = Arc::new(std::sync::Mutex::new(0f64));
+        let progress_max = max_percent.clone();
+        let params = DownloadParams {
+            store: &store,
+            email: "tester@example.com",
+            appid: "123",
+            app_ver_id: None,
+            download_path: &download_path,
+            auto_purchase: false,
+            token: None,
+            progress_callback: Some(Arc::new(move |progress: DownloadProgress| {
+                if let Some(percent) = progress.progress {
+                    let mut max = progress_max.lock().unwrap();
+                    *max = max.max(percent);
+                }
+            })),
+        };
+
+        let result = download_ipa_with_account(params).await.unwrap();
+        assert!(result.ok, "{:?}", result.error);
+        let file = result.file.unwrap();
+        assert!(file.ends_with("Test-1.2.3@com.example.test.ipa"), "{file}");
+        assert_eq!(*max_percent.lock().unwrap(), 100.0);
+        // Only the final IPA remains: no .partial, no part files, no rewrite temp file.
+        assert_eq!(
+            leftover_files(&dir),
+            vec!["Test-1.2.3@com.example.test.ipa".to_string()]
+        );
+
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&file).unwrap()).unwrap();
+        let mut sinf = Vec::new();
+        zip.by_name("Payload/Test.app/SC_Info/Test.sinf")
+            .unwrap()
+            .read_to_end(&mut sinf)
+            .unwrap();
+        assert_eq!(sinf, b"main-sinf");
+        let mut metadata = Vec::new();
+        zip.by_name("iTunesMetadata.plist")
+            .unwrap()
+            .read_to_end(&mut metadata)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&metadata).contains("tester@example.com"));
+        let mut copied = Vec::new();
+        zip.by_name("Payload/Test.app/Test")
+            .unwrap()
+            .read_to_end(&mut copied)
+            .unwrap();
+        assert!(copied == binary);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn failed_download_leaves_no_partial_or_ipa_behind() {
+        let ipa = Arc::new(sample_ipa(&[1u8; 4096]));
+        // A mismatching Content-Range is a hard error (no retry).
+        let url = serve_file(ipa.clone(), |_, range| {
+            range.map(|_| {
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/3\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            })
+        })
+        .await;
+
+        let dir = temp_download_dir("ipa-download-fail");
+        let download_path = dir.to_string_lossy().into_owned();
+        let store = SongListStore {
+            song: song_for(&url),
+        };
+        let params = DownloadParams {
+            store: &store,
+            email: "tester@example.com",
+            appid: "123",
+            app_ver_id: None,
+            download_path: &download_path,
+            auto_purchase: false,
+            token: None,
+            progress_callback: None,
+        };
+
+        assert!(download_ipa_with_account(params).await.is_err());
+        assert!(
+            leftover_files(&dir).is_empty(),
+            "{:?}",
+            leftover_files(&dir)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

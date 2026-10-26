@@ -417,7 +417,7 @@ fn parse_apple_plist_response(body: &str) -> Result<HashMap<String, Value>, Stri
 
             // Neither plist nor JSON — log raw body for debugging
             log::error!(
-                "Apple returned unparseable response ({} bytes): {:300}",
+                "Apple returned unparseable response ({} bytes): {:.300}",
                 body.len(),
                 body
             );
@@ -1721,7 +1721,8 @@ mod tests {
             let task = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buffer = [0; 4096];
-                socket.read(&mut buffer).await.unwrap();
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "client closed before sending a request");
                 socket.write_all(reply.as_bytes()).await.unwrap();
             });
             let error = Store::new().post_store_plist(&format!("http://{address}/store"), Store::apple_plist_headers(), vec![]).await.unwrap_err();

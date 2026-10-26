@@ -1,6 +1,6 @@
 # 多阶段构建 Dockerfile（完全修复版）
 # 前端构建阶段
-FROM node:18-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 
 # 安装 pnpm
 RUN npm install -g pnpm@9
@@ -118,7 +118,7 @@ ENV DATABASE_PATH=/app/data/ipa-webtool.db
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -fsS "http://localhost:${PORT:-8080}/health" || exit 1
 
 # 运行应用
 CMD ["./server"]

@@ -190,9 +190,23 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
+
+`X-Forwarded-Proto` 让后端生成 `https://` 的 OTA 链接，并为登录 Cookie 加上 `Secure` 标记。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PORT` | `8080` | 监听端口（绑定 `0.0.0.0:$PORT`） |
+| `BIND_ADDRESS` | — | 完整监听地址，如 `127.0.0.1:8080`，优先于 `PORT` |
+| `IPA_TOOL_PUBLIC_BASE_URL` | — | OTA / 下载链接使用的公网地址，如 `https://ipa.example.com` |
+| `FORCE_SECURE_COOKIE` | 自动 | `1` 始终为 Cookie 设置 `Secure`，`0` 从不设置；默认跟随请求协议 |
+| `IPA_ADMIN_INITIAL_PASSWORD` | 随机 | 仅首次启动时使用的管理员密码 |
+| `DATABASE_PATH` | `data/ipa-webtool.db` | SQLite 数据库位置 |
 
 ## 技术栈
 
