@@ -62,13 +62,13 @@ defineProps({
   50% { opacity: 0.4; }
 }
 .skeleton {
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
   border-radius: 8px;
   animation: skeleton-pulse 1.5s ease-in-out infinite;
   margin-bottom: 10px;
 }
 .dark .skeleton {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 .skeleton--line {
   height: 16px;
@@ -87,21 +87,21 @@ defineProps({
 .empty-state__icon {
   margin-bottom: 16px;
   opacity: 0.4;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
 }
 .empty-state__icon-svg {
   width: 48px;
   height: 48px;
 }
 .dark .empty-state__icon {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .empty-state__text {
   font-size: 13px;
-  color: var(--color-text-tertiary, #c0c0c0);
+  color: var(--color-text-tertiary);
   margin: 0;
 }
 .dark .empty-state__text {
-  color: var(--color-text-tertiary, #71717a);
+  color: var(--color-text-tertiary);
 }
 </style>

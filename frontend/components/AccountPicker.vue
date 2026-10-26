@@ -359,7 +359,7 @@ defineExpose({
   position: fixed;
   inset: 0;
   z-index: 1000;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(var(--rgb-black), 0.5);
   display: flex;
   align-items: flex-end;
   justify-content: center;

@@ -117,23 +117,23 @@ const handleClick = (e) => {
 }
 
 .mobile-card--primary {
-  background: rgba(10, 132, 255, 0.05);
-  border-color: rgba(10, 132, 255, 0.2);
+  background: rgba(var(--rgb-ios-blue), 0.05);
+  border-color: rgba(var(--rgb-ios-blue), 0.2);
 }
 
 .mobile-card--success {
-  background: rgba(34, 197, 94, 0.05);
-  border-color: rgba(34, 197, 94, 0.2);
+  background: rgba(var(--rgb-green), 0.05);
+  border-color: rgba(var(--rgb-green), 0.2);
 }
 
 .mobile-card--warning {
-  background: rgba(245, 158, 11, 0.05);
-  border-color: rgba(245, 158, 11, 0.2);
+  background: rgba(var(--rgb-amber), 0.05);
+  border-color: rgba(var(--rgb-amber), 0.2);
 }
 
 .mobile-card--danger {
-  background: rgba(239, 68, 68, 0.05);
-  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(var(--rgb-red), 0.05);
+  border-color: rgba(var(--rgb-red), 0.2);
 }
 
 /* 悬停效果（仅桌面） */
@@ -144,19 +144,19 @@ const handleClick = (e) => {
   }
 
   .mobile-card--primary.is-clickable:hover {
-    background: rgba(10, 132, 255, 0.08);
+    background: rgba(var(--rgb-ios-blue), 0.08);
   }
 
   .mobile-card--success.is-clickable:hover {
-    background: rgba(34, 197, 94, 0.08);
+    background: rgba(var(--rgb-green), 0.08);
   }
 
   .mobile-card--warning.is-clickable:hover {
-    background: rgba(245, 158, 11, 0.08);
+    background: rgba(var(--rgb-amber), 0.08);
   }
 
   .mobile-card--danger.is-clickable:hover {
-    background: rgba(239, 68, 68, 0.08);
+    background: rgba(var(--rgb-red), 0.08);
   }
 }
 
@@ -171,7 +171,7 @@ const handleClick = (e) => {
 .mobile-card__header {
   padding: var(--space-4);
   border-bottom: 1px solid var(--separator);
-  background: rgba(0, 0, 0, 0.02);
+  background: rgba(var(--rgb-black), 0.02);
 }
 
 .mobile-card__body {
@@ -182,7 +182,7 @@ const handleClick = (e) => {
 .mobile-card__footer {
   padding: var(--space-4);
   border-top: 1px solid var(--separator);
-  background: rgba(0, 0, 0, 0.02);
+  background: rgba(var(--rgb-black), 0.02);
 }
 
 /* 涟漪效果 */
@@ -192,7 +192,7 @@ const handleClick = (e) => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(10, 132, 255, 0.1);
+  background: rgba(var(--rgb-ios-blue), 0.1);
   opacity: 0;
   transition: opacity 0.2s ease;
   pointer-events: none;
@@ -207,32 +207,32 @@ const handleClick = (e) => {
 /* 深色模式 */
 .dark .mobile-card__header,
 .dark .mobile-card__footer {
-  background: rgba(255, 255, 255, 0.02);
-  border-color: rgba(255, 255, 255, 0.05);
+  background: rgba(var(--rgb-white), 0.02);
+  border-color: rgba(var(--rgb-white), 0.05);
 }
 
 .dark .mobile-card--primary {
-  background: rgba(10, 132, 255, 0.1);
-  border-color: rgba(10, 132, 255, 0.3);
+  background: rgba(var(--rgb-ios-blue), 0.1);
+  border-color: rgba(var(--rgb-ios-blue), 0.3);
 }
 
 .dark .mobile-card--success {
-  background: rgba(34, 197, 94, 0.1);
-  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(var(--rgb-green), 0.1);
+  border-color: rgba(var(--rgb-green), 0.3);
 }
 
 .dark .mobile-card--warning {
-  background: rgba(245, 158, 11, 0.1);
-  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(var(--rgb-amber), 0.1);
+  border-color: rgba(var(--rgb-amber), 0.3);
 }
 
 .dark .mobile-card--danger {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(var(--rgb-red), 0.1);
+  border-color: rgba(var(--rgb-red), 0.3);
 }
 
 .dark .mobile-card__ripple {
-  background: rgba(52, 211, 153, 0.1);
+  background: rgba(var(--rgb-emerald), 0.1);
 }
 
 /* 高对比度模式 */

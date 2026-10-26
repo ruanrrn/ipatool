@@ -207,11 +207,11 @@ const handleChangePasswordSuccess = async (user) => {
   -webkit-tap-highlight-color: transparent;
 }
 .login-btn:active:not(:disabled) {
-  background: var(--color-primary-hover, #0e8c6b);
+  background: var(--color-primary-hover);
   transform: scale(0.98);
 }
 .login-btn:disabled {
-  background: var(--color-text-disabled, #d1d5db);
+  background: var(--color-text-disabled);
   cursor: not-allowed;
 }
 </style>

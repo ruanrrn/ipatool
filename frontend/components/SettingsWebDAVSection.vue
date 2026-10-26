@@ -395,17 +395,17 @@ function selectCurrent() {
 }
 .webdav__desc {
   font-size: 12px;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   line-height: 1.5;
   margin-bottom: 14px;
 }
 .dark .webdav__desc {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .sr-icon--webdav {
-  background: rgba(16, 163, 127, 0.12);
-  color: var(--color-primary, #10a37f);
+  background: rgba(var(--rgb-brand), 0.12);
+  color: var(--color-primary);
 }
 
 /* Toggle switch */
@@ -414,7 +414,7 @@ function selectCurrent() {
   width: 44px;
   height: 26px;
   border-radius: 13px;
-  background: var(--color-border, #d4d4d8);
+  background: var(--color-border);
   border: none;
   cursor: pointer;
   transition: background 0.2s ease;
@@ -422,10 +422,10 @@ function selectCurrent() {
   flex-shrink: 0;
 }
 .dark .webdav__toggle {
-  background: var(--color-border, #3f3f46);
+  background: var(--color-border);
 }
 .webdav__toggle--on {
-  background: var(--color-primary, #10a37f);
+  background: var(--color-primary);
 }
 .webdav__toggle-knob {
   position: absolute;
@@ -434,9 +434,9 @@ function selectCurrent() {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--color-white);
   transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 3px rgba(var(--rgb-black), 0.2);
 }
 .webdav__toggle--on .webdav__toggle-knob {
   transform: translateX(18px);
@@ -457,10 +457,10 @@ function selectCurrent() {
 .webdav__field-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
 }
 .dark .webdav__field-label {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .webdav__field-hint {
   font-weight: 400;
@@ -470,24 +470,24 @@ function selectCurrent() {
   width: 100%;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid var(--color-border, #d4d4d8);
-  background: var(--color-surface-muted, #f7f7f8);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
   font-size: 16px;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
   outline: none;
   transition: border-color 0.15s ease;
   box-sizing: border-box;
 }
 .dark .webdav__input {
-  background: var(--color-surface-muted, #27272a);
-  border-color: var(--color-border, #3f3f46);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface-muted);
+  border-color: var(--color-border);
+  color: var(--color-text);
 }
 .webdav__input:focus {
-  border-color: var(--color-primary, #10a37f);
+  border-color: var(--color-primary);
 }
 .webdav__input::placeholder {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 /* Path row */
@@ -503,9 +503,9 @@ function selectCurrent() {
   padding: 8px 14px;
   min-height: 40px;
   border-radius: 8px;
-  border: 1px solid var(--color-border, #d4d4d8);
-  background: var(--color-surface-muted, #f7f7f8);
-  color: var(--color-text, #0d0d0d);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
@@ -515,9 +515,9 @@ function selectCurrent() {
   -webkit-tap-highlight-color: transparent;
 }
 .dark .webdav__browse-btn {
-  background: var(--color-surface-muted, #27272a);
-  border-color: var(--color-border, #3f3f46);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface-muted);
+  border-color: var(--color-border);
+  color: var(--color-text);
 }
 .webdav__browse-btn:disabled {
   opacity: 0.5;
@@ -527,41 +527,41 @@ function selectCurrent() {
 /* Browser */
 .webdav__browser {
   margin-top: 8px;
-  border: 1px solid var(--color-border, #d4d4d8);
+  border: 1px solid var(--color-border);
   border-radius: 10px;
   overflow: hidden;
-  background: var(--color-surface, #fff);
+  background: var(--color-surface);
 }
 .dark .webdav__browser {
-  background: var(--color-surface, #1a1a2e);
-  border-color: var(--color-border, #3f3f46);
+  background: var(--color-surface);
+  border-color: var(--color-border);
 }
 .webdav__browser-header {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border, #d4d4d8);
-  background: var(--color-surface-muted, #f7f7f8);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
 }
 .dark .webdav__browser-header {
-  background: var(--color-surface-muted, #27272a);
-  border-color: var(--color-border, #3f3f46);
+  background: var(--color-surface-muted);
+  border-color: var(--color-border);
 }
 .webdav__browser-nav {
   flex-shrink: 0;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid var(--color-border, #d4d4d8);
-  background: var(--color-surface, #fff);
-  color: var(--color-text, #0d0d0d);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-size: 12px;
   cursor: pointer;
 }
 .dark .webdav__browser-nav {
-  background: var(--color-surface, #1a1a2e);
-  border-color: var(--color-border, #3f3f46);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
 }
 .webdav__browser-nav:disabled {
   opacity: 0.4;
@@ -570,13 +570,13 @@ function selectCurrent() {
 .webdav__browser-path {
   font-size: 12px;
   font-family: monospace;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dark .webdav__browser-path {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .webdav__browser-body {
   max-height: 200px;
@@ -590,27 +590,27 @@ function selectCurrent() {
   padding: 8px 12px;
   cursor: default;
   font-size: 13px;
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
   transition: background 0.1s ease;
 }
 .dark .webdav__browser-entry {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 .webdav__browser-entry--dir {
   cursor: pointer;
   user-select: none;
 }
 .webdav__browser-entry--dir:hover {
-  background: var(--color-surface-muted, #f7f7f8);
+  background: var(--color-surface-muted);
 }
 .dark .webdav__browser-entry--dir:hover {
-  background: var(--color-surface-muted, #27272a);
+  background: var(--color-surface-muted);
 }
 .webdav__browser-entry--dir:active {
-  background: var(--color-surface-hover, #e4e4e7);
+  background: var(--color-surface-hover);
 }
 .dark .webdav__browser-entry--dir:active {
-  background: var(--color-surface-hover, #3f3f46);
+  background: var(--color-surface-hover);
 }
 .webdav__browser-entry--file {
   opacity: 0.65;
@@ -618,7 +618,7 @@ function selectCurrent() {
 .webdav__browser-arrow {
   margin-left: auto;
   font-size: 16px;
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
   font-weight: 600;
   padding-left: 8px;
 }
@@ -638,10 +638,10 @@ function selectCurrent() {
   padding: 20px 12px;
   text-align: center;
   font-size: 12px;
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 .webdav__browse-error {
-  color: var(--color-danger, #ef4444);
+  color: var(--color-danger);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -650,25 +650,25 @@ function selectCurrent() {
 .webdav__browse-retry-btn {
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid var(--color-border, #d4d4d8);
-  background: var(--color-surface, #fff);
-  color: var(--color-text, #0d0d0d);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-size: 12px;
   cursor: pointer;
 }
 .dark .webdav__browse-retry-btn {
-  background: var(--color-surface, #1a1a2e);
-  border-color: var(--color-border, #3f3f46);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
 }
 .webdav__browser-footer {
   display: flex;
   gap: 8px;
   padding: 10px 12px;
-  border-top: 1px solid var(--color-border, #d4d4d8);
+  border-top: 1px solid var(--color-border);
 }
 .dark .webdav__browser-footer {
-  border-color: var(--color-border, #3f3f46);
+  border-color: var(--color-border);
 }
 .webdav__browser-select {
   flex: 1;
@@ -682,12 +682,12 @@ function selectCurrent() {
   margin-bottom: 12px;
 }
 .webdav__test-result--ok {
-  background: rgba(16, 163, 127, 0.1);
-  color: var(--color-primary, #10a37f);
+  background: rgba(var(--rgb-brand), 0.1);
+  color: var(--color-primary);
 }
 .webdav__test-result--fail {
-  background: rgba(239, 68, 68, 0.1);
-  color: var(--color-danger, #ef4444);
+  background: rgba(var(--rgb-red), 0.1);
+  color: var(--color-danger);
 }
 
 /* Actions */
@@ -710,17 +710,17 @@ function selectCurrent() {
   cursor: default;
 }
 .webdav__btn--primary {
-  background: var(--color-primary, #10a37f);
-  color: #fff;
+  background: var(--color-primary);
+  color: var(--color-white);
 }
 .webdav__btn--secondary {
-  background: var(--color-surface-muted, #f7f7f8);
-  color: var(--color-text, #0d0d0d);
-  border: 1px solid var(--color-border, #d4d4d8);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
 }
 .dark .webdav__btn--secondary {
-  background: var(--color-surface-muted, #27272a);
-  color: var(--color-text, #f5f5f5);
-  border-color: var(--color-border, #3f3f46);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  border-color: var(--color-border);
 }
 </style>

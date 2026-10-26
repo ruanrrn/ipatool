@@ -262,7 +262,7 @@ watch(() => appStore.activeTab, () => {
 .desktop-tabs {
   display: flex;
   gap: var(--space-2);
-  border-bottom: 1px solid var(--color-border-light, #f0f0f0);
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .desktop-tab {
@@ -275,7 +275,7 @@ watch(() => appStore.activeTab, () => {
   border: 0;
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   background: transparent;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   font-size: var(--font-size-body);
   font-weight: 500;
   cursor: pointer;
@@ -295,16 +295,16 @@ watch(() => appStore.activeTab, () => {
 }
 
 .desktop-tab.is-active {
-  background: var(--color-primary-soft, #ecfdf5);
-  color: var(--color-primary, #10a37f);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
 }
 
 .desktop-tab.is-active::after {
-  background: var(--color-primary, #10a37f);
+  background: var(--color-primary);
 }
 
 .desktop-tab:hover:not(.is-active) {
-  color: var(--color-text, #0d0d0d);
+  color: var(--color-text);
 }
 
 .tab-content {
@@ -321,11 +321,11 @@ watch(() => appStore.activeTab, () => {
   inset-inline: 0;
   bottom: 0;
   z-index: 50;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(var(--rgb-white), 0.92);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
   padding-bottom: env(safe-area-inset-bottom);
-  border-top: 1px solid var(--color-border-light, #f0f0f0);
+  border-top: 1px solid var(--color-border-light);
 }
 
 .mobile-tabs {
@@ -357,7 +357,7 @@ watch(() => appStore.activeTab, () => {
 }
 
 .mobile-tab.is-active {
-  background: var(--color-primary-soft, #ecfdf5);
+  background: var(--color-primary-soft);
 }
 
 .mobile-tab__icon-wrap {
@@ -372,24 +372,24 @@ watch(() => appStore.activeTab, () => {
 .mobile-tab .tab-layout__icon {
   width: 22px;
   height: 22px;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   transition: color 0.2s ease;
 }
 
 .mobile-tab.is-active .tab-layout__icon {
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
 }
 
 .mobile-tab__label {
   font-size: 11px;
   font-weight: 500;
-  color: var(--color-text-muted, #6e6e80);
+  color: var(--color-text-muted);
   line-height: 1.2;
   transition: color 0.2s ease;
 }
 
 .mobile-tab.is-active .mobile-tab__label {
-  color: var(--color-primary, #10a37f);
+  color: var(--color-primary);
   font-weight: 600;
 }
 
@@ -417,45 +417,45 @@ watch(() => appStore.activeTab, () => {
 
 /* ===== Dark Mode ===== */
 .dark .desktop-tabs {
-  border-bottom-color: var(--color-border, #3f3f46);
+  border-bottom-color: var(--color-border);
 }
 
 .dark .desktop-tab {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .desktop-tab.is-active {
-  background: rgba(52, 211, 153, 0.12);
-  color: var(--color-primary, #34d399);
+  background: rgba(var(--rgb-emerald), 0.12);
+  color: var(--color-primary);
 }
 
 .dark .desktop-tab:hover:not(.is-active) {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 .dark .mobile-tabs-wrap {
-  background: rgba(24, 24, 27, 0.88);
-  border-top-color: var(--color-border, #3f3f46);
+  background: rgba(var(--rgb-zinc-900), 0.88);
+  border-top-color: var(--color-border);
 }
 
 .dark .mobile-tab .tab-layout__icon {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-tab.is-active .tab-layout__icon {
-  color: var(--color-primary, #34d399);
+  color: var(--color-primary);
 }
 
 .dark .mobile-tab.is-active {
-  background: rgba(52, 211, 153, 0.12);
+  background: rgba(var(--rgb-emerald), 0.12);
 }
 
 .dark .mobile-tab__label {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-tab.is-active .mobile-tab__label {
-  color: var(--color-primary, #34d399);
+  color: var(--color-primary);
   font-weight: 600;
 }
 

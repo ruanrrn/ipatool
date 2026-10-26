@@ -141,7 +141,7 @@ const getOrCreateThemeColorMeta = () => {
   return meta
 }
 
-const applyNativeConfirmChromeTint = (color = '#8f8f99') => {
+const applyNativeConfirmChromeTint = (color = '#8f8f99') => { // color-literal-ok: <meta theme-color> value
   if (typeof document === 'undefined') return () => {}
 
   const meta = getOrCreateThemeColorMeta()
@@ -189,7 +189,7 @@ export const Confirm = {
   justify-content: center;
 
   padding: 40px;
-  background: var(--color-overlay-dialog, rgba(0, 0, 0, 0.5));
+  background: var(--color-overlay-dialog);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -199,8 +199,8 @@ export const Confirm = {
   border-radius: var(--radius-3xl, 18px);
   border: none;
 
-  background: var(--color-surface, #fff);
-  box-shadow: var(--shadow-dialog, 0 20px 40px rgba(0, 0, 0, 0.15));
+  background: var(--color-surface);
+  box-shadow: var(--shadow-dialog);
 
   overflow: hidden;
   padding: 24px;
@@ -229,7 +229,7 @@ export const Confirm = {
   font-family: var(--font-body);
   font-size: 17px;
   font-weight: 600;
-  color: var(--color-text-primary, #0d0d0d);
+  color: var(--color-text-primary);
   text-align: center;
   line-height: 1.3;
 }
@@ -238,7 +238,7 @@ export const Confirm = {
   padding: 0 0 20px;
   font-family: var(--font-body);
   font-size: 14px;
-  color: var(--color-text-secondary, #6e6e80);
+  color: var(--color-text-secondary);
   text-align: center;
   white-space: pre-wrap;
   line-height: 1.5;
@@ -264,8 +264,8 @@ export const Confirm = {
 }
 
 .mobile-confirm__btn--cancel {
-  background: var(--color-bg-surface, #f7f7f8);
-  color: var(--color-text-primary, #0d0d0d);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
 }
 
 .mobile-confirm__btn--cancel:active {
@@ -273,21 +273,21 @@ export const Confirm = {
 }
 
 .mobile-confirm__btn--primary {
-  background: var(--color-primary, #10a37f);
-  color: var(--color-text-inverse, #fff);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
 }
 
 .mobile-confirm__btn--primary:active {
-  background: var(--color-primary-active, #0c7a5e);
+  background: var(--color-primary-active);
 }
 
 .mobile-confirm__btn--danger {
-  background: var(--color-danger, #ef4444);
-  color: var(--color-text-inverse, #fff);
+  background: var(--color-danger);
+  color: var(--color-text-inverse);
 }
 
 .mobile-confirm__btn--danger:active {
-  background: var(--color-danger-hover, #dc2626);
+  background: var(--color-danger-hover);
 }
 
 /* 触摸反馈 */
@@ -299,35 +299,35 @@ export const Confirm = {
 
 /* 深色模式 */
 .dark .mobile-confirm {
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(var(--rgb-black), 0.7);
 }
 
 .dark .mobile-confirm__panel {
-  background: var(--color-surface, #18181b);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  background: var(--color-surface);
+  box-shadow: 0 20px 40px rgba(var(--rgb-black), 0.5);
 }
 
 .dark .mobile-confirm__title {
-  color: var(--color-text, #f5f5f5);
+  color: var(--color-text);
 }
 
 .dark .mobile-confirm__message {
-  color: var(--color-text-muted, #a1a1aa);
+  color: var(--color-text-muted);
 }
 
 .dark .mobile-confirm__btn--cancel {
-  background: var(--color-surface-muted, #27272a);
-  color: var(--color-text, #f5f5f5);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
 }
 
 .dark .mobile-confirm__btn--primary:hover {
-  background: var(--color-primary-hover, #6ee7b7);
+  background: var(--color-primary-hover);
 }
 
 /* 高对比度 */
 @media (prefers-contrast: high) {
   .mobile-confirm__panel {
-    border: 2px solid var(--color-border-default, #ebebeb);
+    border: 2px solid var(--color-border-default);
   }
 }
 

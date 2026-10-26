@@ -2,18 +2,22 @@
 
 ## Goal
 
-Make style switching low-cost: future theme/style changes should happen primarily in `src/tokens.css`, not by editing scattered component styles.
+Make style switching low-cost: future theme/style changes should happen primarily in `frontend/tokens.css`, not by editing scattered component styles.
 
 ## Single Source of Truth
 
-- **Allowed design primitives** live in `src/tokens.css`
-- Outside `src/tokens.css`, components should consume tokens via `var(--token-name)`
-- Hardcoded colors outside `src/tokens.css` are forbidden (`npm run lint:tokens`)
+- **Allowed design primitives** live in `frontend/tokens.css`
+- Outside `frontend/tokens.css`, components should consume tokens via `var(--token-name)`
+- Hardcoded colors outside `frontend/tokens.css` are forbidden (`pnpm run lint:tokens`, enforced in CI)
+  - `frontend/tailwind.config.js` maps every palette entry to a `--palette-*` token
+  - Translucent tints use channel tokens: `rgba(var(--rgb-black), 0.5)`
+  - A color that is data rather than style (e.g. the accent picker's options, a
+    `<meta name="theme-color">` value) may stay literal on a line marked `color-literal-ok`
 
 ## Token Layers
 
 1. **Primitive palette**
-   - Radix palette vars imported in `src/main.js`
+   - Radix palette vars imported in `frontend/main.js`
    - Example: `--slate-*`, `--blue-*`, `--red-*`
 2. **Semantic tokens**
    - Example: `--color-bg`, `--color-primary`, `--color-danger`, `--color-border`

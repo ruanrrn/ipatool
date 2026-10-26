@@ -422,7 +422,7 @@ const installButtonTitle = computed(() => {
   padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--color-border);
   background: var(--color-surface);
-  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 -8px 24px rgba(var(--rgb-slate-900), 0.06);
   flex-shrink: 0;
   z-index: 2;
   min-height: 48px;
@@ -550,16 +550,16 @@ const installButtonTitle = computed(() => {
 }
 
 .dark .version-sheet__app-name {
- color: var(--color-text, #f5f5f5);
+ color: var(--color-text);
 }
 
 .dark .version-sheet__app-meta {
- color: var(--color-text-muted, #a1a1aa);
+ color: var(--color-text-muted);
 }
 
 .dark .version-sheet__close {
- background: var(--color-surface-muted, #27272a);
- color: var(--color-text-muted, #a1a1aa);
+ background: var(--color-surface-muted);
+ color: var(--color-text-muted);
 }
 
 .dark .version-sheet__close:active {
@@ -567,7 +567,7 @@ const installButtonTitle = computed(() => {
 }
 
 .dark .version-sheet__note-label {
- color: var(--color-text, #f5f5f5);
+ color: var(--color-text);
 }
 
 .dark .version-sheet__actions {

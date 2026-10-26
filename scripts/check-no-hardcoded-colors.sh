@@ -25,6 +25,17 @@ else
     --exclude-dir="__tests__" 2>/dev/null || true)
 fi
 
+# Drop lines whose only color functions take a token argument, and marked lines.
+if [ -n "$hits" ]; then
+  hits=$(printf '%s\n' "$hits" | while IFS= read -r line; do
+    case "$line" in *color-literal-ok*) continue ;; esac
+    stripped=$(printf '%s' "$line" | sed -E 's/(rgba?|hsla?)\(var\(//g')
+    if printf '%s' "$stripped" | grep -qE "$PATTERN_HEX|(rgba?|hsla?)\\("; then
+      printf '%s\n' "$line"
+    fi
+  done)
+fi
+
 if [ -n "$hits" ]; then
   echo "ERROR: Hardcoded colors found outside $TOKENS_FILE"
   echo

@@ -101,25 +101,25 @@ defineProps({
 
 /* 深色模式 */
 .dark .mobile-tag--default {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--rgb-white), 0.08);
   color: var(--text-secondary);
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(var(--rgb-white), 0.12);
 }
 
 .dark .mobile-tag--primary {
-  background: rgba(10, 132, 255, 0.15);
+  background: rgba(var(--rgb-ios-blue), 0.15);
 }
 
 .dark .mobile-tag--success {
-  background: rgba(52, 199, 89, 0.15);
+  background: rgba(var(--rgb-ios-green), 0.15);
 }
 
 .dark .mobile-tag--warning {
-  background: rgba(255, 159, 10, 0.15);
+  background: rgba(var(--rgb-ios-orange), 0.15);
 }
 
 .dark .mobile-tag--danger {
-  background: rgba(255, 69, 58, 0.15);
+  background: rgba(var(--rgb-ios-red), 0.15);
 }
 
 /* 高对比度模式 */
