@@ -2,8 +2,8 @@ use base64::Engine;
 use plist::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Seek, Write};
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use zip::ZipArchive;
 
@@ -71,14 +71,19 @@ pub struct SignatureApplyResult {
     pub warning: Option<String>,
 }
 
+/// Injects iTunesMetadata.plist and .sinf files into a downloaded IPA.
+///
+/// Changes are staged in memory and applied by `write`, which streams the archive into a
+/// sibling temp file: untouched entries are raw-copied (no decompress/recompress), so memory
+/// use stays bounded regardless of IPA size and original compression is preserved.
 #[derive(Debug, Clone)]
 pub struct SignatureClient {
-    archive: Vec<u8>,
     filename: String,
     raw_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     metadata: SignatureMetadata,
     signatures: Vec<Sinf>,
     email: String,
+    staged_entries: Vec<(String, Vec<u8>)>,
 }
 
 fn normalize_sinf_id(value: &serde_json::Value, fallback_index: usize) -> String {
@@ -118,13 +123,17 @@ fn ordered_unique_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> 
 fn find_app_bundle_name<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // name_for_index only touches the central directory; by_index would seek to and parse
+    // every local header, which is slow for IPAs with tens of thousands of entries.
     for i in 0..zip.len() {
-        let zip_name = zip.by_index(i)?.name().to_string();
+        let Some(zip_name) = zip.name_for_index(i) else {
+            continue;
+        };
         if zip_name.starts_with("Payload/") && zip_name.ends_with(".app/") {
             let bundle = zip_name
                 .strip_prefix("Payload/")
                 .and_then(|s| s.strip_suffix('/'))
-                .unwrap_or(&zip_name)
+                .unwrap_or(zip_name)
                 .to_string();
             return Ok(bundle);
         }
@@ -401,42 +410,48 @@ fn build_injection_plan(
     })
 }
 
-fn replace_zip_entries(
-    archive: &mut Vec<u8>,
-    replacements: &[(String, Vec<u8>)],
+/// Copy every entry of `source` into `writer` except the staged paths, then append the staged
+/// entries. Untouched files are raw-copied so their compressed bytes, CRC and permissions are
+/// preserved and nothing is decompressed into memory.
+fn rewrite_archive<R: Read + Seek, W: Write + Seek>(
+    source: &mut ZipArchive<R>,
+    writer: &mut zip::ZipWriter<W>,
+    staged_entries: &[(String, Vec<u8>)],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let reader = Cursor::new(archive.clone());
-    let mut zip = ZipArchive::new(reader)?;
-    let replacement_paths = replacements
+    let staged_paths = staged_entries
         .iter()
-        .map(|(path, _)| path.clone())
+        .map(|(path, _)| path.as_str())
         .collect::<HashSet<_>>();
 
-    // IMPORTANT: write to a fresh buffer, then replace `archive`.
-    // Writing into the existing Vec via Cursor can leave trailing bytes and corrupt the zip.
-    let mut out = Vec::with_capacity(archive.len() + 1024);
-    let mut new_archive = zip::ZipWriter::new(Cursor::new(&mut out));
-    let options: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
-        if replacement_paths.contains(file.name()) {
+    for i in 0..source.len() {
+        let file = source.by_index_raw(i)?;
+        if staged_paths.contains(file.name()) {
             continue;
         }
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        new_archive.start_file(file.name(), options)?;
-        new_archive.write_all(&buffer)?;
+        if file.is_dir() {
+            // raw_copy_file would OR S_IFREG into a directory's mode, so re-add it explicitly.
+            let mut options: zip::write::SimpleFileOptions =
+                zip::write::SimpleFileOptions::default();
+            if let Some(modified) = file.last_modified().filter(|value| value.is_valid()) {
+                options = options.last_modified_time(modified);
+            }
+            if let Some(mode) = file.unix_mode() {
+                options = options.unix_permissions(mode & 0o7777);
+            }
+            let name = file.name().to_string();
+            drop(file);
+            writer.add_directory(name, options)?;
+            continue;
+        }
+        writer.raw_copy_file(file)?;
     }
 
-    for (path, data) in replacements {
-        new_archive.start_file(path, options)?;
-        new_archive.write_all(data)?;
+    let options: zip::write::SimpleFileOptions =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (path, data) in staged_entries {
+        writer.start_file(path.as_str(), options)?;
+        writer.write_all(data)?;
     }
-
-    let _ = new_archive.finish()?;
-    *archive = out;
     Ok(())
 }
 
@@ -564,8 +579,7 @@ pub fn inspect_ipa_path(
     let app_prefix = format!("Payload/{}/", app_bundle_name);
     let mut present_sinf_paths = Vec::new();
     let mut plugin_dirs = HashSet::new();
-    for i in 0..zip.len() {
-        let name = zip.by_index(i)?.name().to_string();
+    for name in zip.file_names() {
         if name.starts_with(&app_prefix) && name.ends_with(".sinf") {
             present_sinf_paths.push(name.trim_start_matches(&app_prefix).to_string());
         }
@@ -794,12 +808,12 @@ impl SignatureClient {
         }
 
         Ok(SignatureClient {
-            archive: Vec::new(),
             filename: String::new(),
             raw_metadata,
             metadata,
             signatures,
             email: email.to_string(),
+            staged_entries: Vec::new(),
         })
     }
 
@@ -807,12 +821,18 @@ impl SignatureClient {
         &mut self,
         path: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut file = File::open(path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        self.archive = buffer;
+        // Only the central directory is read here; entry data is streamed later by `write`.
+        read_zip(path)?;
         self.filename = path.to_string();
+        self.staged_entries.clear();
         Ok(())
+    }
+
+    /// Stage an entry to be added (or to replace an existing entry with the same path).
+    fn stage_entry(&mut self, path: String, data: Vec<u8>) {
+        self.staged_entries
+            .retain(|(staged_path, _)| *staged_path != path);
+        self.staged_entries.push((path, data));
     }
 
     pub fn append_metadata(&mut self) -> &mut Self {
@@ -915,56 +935,17 @@ impl SignatureClient {
     }
 
     fn write_metadata_to_archive(&mut self, metadata_content: &str) -> &mut Self {
-        let reader = Cursor::new(self.archive.clone());
-        let mut zip = match ZipArchive::new(reader) {
-            Ok(z) => z,
-            Err(_) => {
-                // Source is not a zip; create a new zip with only iTunesMetadata.
-                let mut out = Vec::new();
-                let mut archive = zip::ZipWriter::new(Cursor::new(&mut out));
-                let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored);
-                archive.start_file("iTunesMetadata.plist", options).unwrap();
-                archive.write_all(metadata_content.as_bytes()).unwrap();
-                let _ = archive.finish();
-                self.archive = out;
-                return self;
-            }
-        };
-
-        // IMPORTANT: write to a fresh buffer, then replace `self.archive`.
-        let mut out = Vec::with_capacity(self.archive.len() + 4096);
-        let mut new_archive = zip::ZipWriter::new(Cursor::new(&mut out));
-        let options: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
-        for i in 0..zip.len() {
-            let mut file = zip.by_index(i).unwrap();
-            let name = file.name().to_string();
-            if name == "iTunesMetadata.plist" {
-                continue;
-            }
-            new_archive.start_file(&name, options).unwrap();
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer).unwrap();
-            new_archive.write_all(&buffer).unwrap();
-        }
-
-        new_archive
-            .start_file("iTunesMetadata.plist", options)
-            .unwrap();
-        new_archive.write_all(metadata_content.as_bytes()).unwrap();
-        let _ = new_archive.finish();
-
-        self.archive = out;
+        self.stage_entry(
+            "iTunesMetadata.plist".to_string(),
+            metadata_content.as_bytes().to_vec(),
+        );
         self
     }
 
     pub fn append_signatures(
         &mut self,
     ) -> Result<SignatureApplyResult, Box<dyn std::error::Error + Send + Sync>> {
-        let reader = Cursor::new(self.archive.clone());
-        let mut zip = ZipArchive::new(reader)?;
+        let mut zip = read_zip(&self.filename)?;
         let app_bundle_name = find_app_bundle_name(&mut zip)?;
         let apply_result = if let Some(manifest_targets) =
             read_manifest_targets(&mut zip, &app_bundle_name)?
@@ -1006,28 +987,43 @@ impl SignatureClient {
         }
 
         let decoded_signatures = decode_signatures(&self.signatures)?;
-        let replacements = apply_result
-            .replacements
-            .iter()
-            .map(|replacement| {
-                (
-                    format!("Payload/{}/{}", app_bundle_name, replacement.path),
-                    decoded_signatures[replacement.signature_index].clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        replace_zip_entries(&mut self.archive, &replacements)?;
+        for replacement in &apply_result.replacements {
+            self.stage_entry(
+                format!("Payload/{}/{}", app_bundle_name, replacement.path),
+                decoded_signatures[replacement.signature_index].clone(),
+            );
+        }
         Ok(apply_result)
     }
 
+    /// Apply the staged entries by streaming the archive into a temp file next to the
+    /// original, then atomically renaming it over the original.
     pub fn write(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.filename)?;
+        if self.staged_entries.is_empty() {
+            return Ok(());
+        }
 
-        file.write_all(&self.archive)?;
+        let temp_path = format!("{}.rewrite-{}", self.filename, std::process::id());
+        let rewritten = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut source = read_zip(&self.filename)?;
+            let output = BufWriter::new(File::create(&temp_path)?);
+            let mut writer = zip::ZipWriter::new(output);
+            rewrite_archive(&mut source, &mut writer, &self.staged_entries)?;
+            let mut output = writer.finish()?;
+            output.flush()?;
+            output.get_ref().sync_all()?;
+            Ok(())
+        })();
+
+        if let Err(error) = rewritten {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&temp_path, &self.filename) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        self.staged_entries.clear();
         Ok(())
     }
 }
@@ -1043,7 +1039,55 @@ pub fn read_zip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn empty_metadata() -> SignatureMetadata {
+        SignatureMetadata {
+            bundle_display_name: None,
+            bundle_short_version_string: None,
+            bundle_id: None,
+            artwork_url: None,
+            artist_name: None,
+            apple_id: None,
+            user_name: None,
+        }
+    }
+
+    /// Write `archive` to a unique temp file and return a client loaded from it.
+    fn client_for_archive(
+        archive: Vec<u8>,
+        raw_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+        signatures: Vec<Sinf>,
+    ) -> SignatureClient {
+        let path = std::env::temp_dir().join(format!(
+            "signature-test-{}-{}.ipa",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, archive).unwrap();
+        let mut client = SignatureClient {
+            filename: String::new(),
+            raw_metadata,
+            metadata: empty_metadata(),
+            signatures,
+            email: "tester@example.com".to_string(),
+            staged_entries: Vec::new(),
+        };
+        client.load_file(&path.to_string_lossy()).unwrap();
+        client
+    }
+
+    /// Apply staged changes and return the rewritten archive, removing the temp file.
+    fn written_archive(client: &mut SignatureClient) -> ZipArchive<Cursor<Vec<u8>>> {
+        client.write().unwrap();
+        let bytes = std::fs::read(&client.filename).unwrap();
+        let _ = std::fs::remove_file(&client.filename);
+        ZipArchive::new(Cursor::new(bytes)).unwrap()
+    }
 
     fn sample_signatures(count: usize) -> Vec<Sinf> {
         (0..count)
@@ -1141,25 +1185,14 @@ mod tests {
             ("Payload/Test.app/Info.plist", info_plist("TestExec")),
         ]);
 
-        let mut client = SignatureClient {
+        let mut client = client_for_archive(
             archive,
-            filename: String::new(),
-            raw_metadata: None,
-            metadata: SignatureMetadata {
-                bundle_display_name: None,
-                bundle_short_version_string: None,
-                bundle_id: None,
-                artwork_url: None,
-                artist_name: None,
-                apple_id: None,
-                user_name: None,
-            },
-            signatures: vec![Sinf {
+            None,
+            vec![Sinf {
                 id: "0".to_string(),
                 sinf: base64::engine::general_purpose::STANDARD.encode(b"fallback-sinf"),
             }],
-            email: "tester@example.com".to_string(),
-        };
+        );
 
         let result = client.append_signatures().unwrap();
         assert_eq!(result.applied_paths, vec!["SC_Info/TestExec.sinf"]);
@@ -1168,7 +1201,7 @@ mod tests {
             .unwrap_or_default()
             .contains("回退注入首个 sinf"));
 
-        let mut zip = ZipArchive::new(Cursor::new(client.archive)).unwrap();
+        let mut zip = written_archive(&mut client);
         let mut entry = zip
             .by_name("Payload/Test.app/SC_Info/TestExec.sinf")
             .unwrap();
@@ -1213,33 +1246,12 @@ mod tests {
             },
         ];
 
-        let mut client = SignatureClient {
-            archive,
-            filename: format!(
-                "/tmp/signature-test-{}.ipa",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ),
-            raw_metadata: None,
-            metadata: SignatureMetadata {
-                bundle_display_name: None,
-                bundle_short_version_string: None,
-                bundle_id: None,
-                artwork_url: None,
-                artist_name: None,
-                apple_id: None,
-                user_name: None,
-            },
-            signatures,
-            email: "tester@example.com".to_string(),
-        };
+        let mut client = client_for_archive(archive, None, signatures);
 
         let result = client.append_signatures().unwrap();
         assert!(result.warning.is_none());
 
-        let mut zip = ZipArchive::new(Cursor::new(client.archive)).unwrap();
+        let mut zip = written_archive(&mut client);
 
         let mut main_bytes = Vec::new();
         zip.by_name("Payload/Test.app/SC_Info/Main.sinf")
@@ -1288,26 +1300,11 @@ mod tests {
         .cloned()
         .unwrap();
 
-        let mut client = SignatureClient {
-            archive,
-            filename: String::new(),
-            raw_metadata: Some(raw_metadata),
-            metadata: SignatureMetadata {
-                bundle_display_name: None,
-                bundle_short_version_string: None,
-                bundle_id: None,
-                artwork_url: None,
-                artist_name: None,
-                apple_id: None,
-                user_name: None,
-            },
-            signatures: Vec::new(),
-            email: "tester@example.com".to_string(),
-        };
+        let mut client = client_for_archive(archive, Some(raw_metadata), Vec::new());
 
         client.append_metadata();
 
-        let mut zip = ZipArchive::new(Cursor::new(client.archive)).unwrap();
+        let mut zip = written_archive(&mut client);
         let mut entry = zip.by_name("iTunesMetadata.plist").unwrap();
         let mut content = Vec::new();
         entry.read_to_end(&mut content).unwrap();
@@ -1343,5 +1340,75 @@ mod tests {
             dict.get("userName").and_then(|v| v.as_string()),
             Some("tester@example.com")
         );
+    }
+
+    #[test]
+    fn write_preserves_untouched_entries_and_their_compression() {
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut out));
+            let deflated: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o755);
+            zip.add_directory(
+                "Payload/Test.app/",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.start_file("Payload/Test.app/Info.plist", deflated)
+                .unwrap();
+            zip.write_all(&info_plist("TestExec")).unwrap();
+            zip.start_file("Payload/Test.app/TestExec", deflated)
+                .unwrap();
+            zip.write_all(&vec![7u8; 64 * 1024]).unwrap();
+            zip.start_file("iTunesMetadata.plist", deflated).unwrap();
+            zip.write_all(b"stale").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let mut client = client_for_archive(
+            out,
+            None,
+            vec![Sinf {
+                id: "0".to_string(),
+                sinf: base64::engine::general_purpose::STANDARD.encode(b"main-sinf"),
+            }],
+        );
+        client.append_metadata();
+        client.append_signatures().unwrap();
+        let mut zip = written_archive(&mut client);
+
+        let names = zip.file_names().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| *name == "iTunesMetadata.plist")
+                .count(),
+            1
+        );
+
+        let mut binary = zip.by_name("Payload/Test.app/TestExec").unwrap();
+        assert_eq!(binary.compression(), zip::CompressionMethod::Deflated);
+        assert_eq!(binary.unix_mode().map(|mode| mode & 0o777), Some(0o755));
+        let mut content = Vec::new();
+        binary.read_to_end(&mut content).unwrap();
+        assert_eq!(content, vec![7u8; 64 * 1024]);
+        drop(binary);
+
+        assert!(zip.by_name("Payload/Test.app/").unwrap().is_dir());
+
+        let mut metadata = Vec::new();
+        zip.by_name("iTunesMetadata.plist")
+            .unwrap()
+            .read_to_end(&mut metadata)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&metadata).contains("tester@example.com"));
+
+        let mut sinf = Vec::new();
+        zip.by_name("Payload/Test.app/SC_Info/TestExec.sinf")
+            .unwrap()
+            .read_to_end(&mut sinf)
+            .unwrap();
+        assert_eq!(sinf, b"main-sinf");
     }
 }

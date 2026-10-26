@@ -1,9 +1,12 @@
 <template>
+  <!-- icon is always a bundled `?raw` SVG asset, never user input, so v-html is safe here -->
+  <!-- eslint-disable vue/no-v-html -->
   <span
     class="svg-icon"
     aria-hidden="true"
     v-html="icon"
   />
+  <!-- eslint-enable vue/no-v-html -->
 </template>
 
 <script setup>
