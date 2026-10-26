@@ -463,6 +463,15 @@ fn request_uses_https(req: &HttpRequest) -> bool {
 
 const MIN_ADMIN_PASSWORD_CHARS: usize = 8;
 
+/// Whether `username` still has `expected_hash`. Call with the DB lock held, after verifying a
+/// password against a hash snapshot taken before the lock was released for bcrypt.
+fn admin_password_hash_unchanged(db: &Database, username: &str, expected_hash: &str) -> bool {
+    db.get_admin_user(username)
+        .ok()
+        .flatten()
+        .is_some_and(|user| user.password_hash == expected_hash)
+}
+
 fn resolved_account_region(result: &HashMap<String, Value>, fallback: Option<String>) -> String {
     result
         .get("region")
@@ -1906,6 +1915,18 @@ mod tests {
             Some(expires),
             Some("short")
         ));
+    }
+
+    #[test]
+    fn admin_password_hash_check_detects_concurrent_change() {
+        let db = Database::new(":memory:").unwrap();
+        let snapshot = db.get_admin_user("admin").unwrap().unwrap().password_hash;
+        assert!(admin_password_hash_unchanged(&db, "admin", &snapshot));
+
+        db.update_admin_password("admin", &hash_password("changed-elsewhere"), false)
+            .unwrap();
+        assert!(!admin_password_hash_unchanged(&db, "admin", &snapshot));
+        assert!(!admin_password_hash_unchanged(&db, "ghost", &snapshot));
     }
 
     #[test]
@@ -4414,6 +4435,17 @@ async fn admin_login(
         }
     };
 
+    // bcrypt ran without the DB lock: if a password change/reset landed meanwhile, the password
+    // just verified is stale and must neither create a session nor drive the hash upgrade.
+    if !admin_password_hash_unchanged(&db, &user.username, &user.password_hash) {
+        log::warn!(
+            "[auth:login] password changed during verification for user={}",
+            username
+        );
+        return HttpResponse::Unauthorized()
+            .json(ApiResponse::<String>::error("用户名或密码错误".to_string()));
+    }
+
     if let Some(upgraded_hash) = upgraded_hash {
         // Legacy unsalted SHA-256 hashes are replaced with bcrypt on first successful login.
         match db.update_admin_password(&user.username, &upgraded_hash, user.is_default) {
@@ -4570,6 +4602,18 @@ async fn change_password(
             ));
         }
     };
+
+    // The current password was verified without the DB lock; refuse to write if another
+    // request changed it in the meantime (the old password is no longer proof of identity).
+    if !admin_password_hash_unchanged(&db, &admin.username, &user.password_hash) {
+        log::warn!(
+            "[auth:change-pwd] password changed concurrently for user={}",
+            admin.username
+        );
+        return HttpResponse::Conflict().json(ApiResponse::<String>::error(
+            "密码已被其他会话修改，请重新登录后再试".to_string(),
+        ));
+    }
 
     // Atomic: update password + rename in one transaction; other sessions are revoked.
     let final_username = match db.change_password_and_rename(
