@@ -63,7 +63,7 @@
       </button>
       <button
         class="q-btn"
-        title="取消任务"
+        title="从列表移除"
         @click="emit('remove', task.id)"
       >
         <SvgIcon

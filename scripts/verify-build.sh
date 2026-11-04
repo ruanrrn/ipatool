@@ -1,7 +1,9 @@
 #!/bin/bash
 # Docker构建验证脚本
 
-set -e
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 echo "=== 开始验证Docker构建 ==="
 
@@ -14,7 +16,7 @@ required_files=(
     "server/Cargo.toml"
     "server/Cargo.lock"
     "server/src/main.rs"
-    "src/App.vue"
+    "frontend/App.vue"
 )
 
 for file in "${required_files[@]}"; do
@@ -29,7 +31,7 @@ done
 # 2. 验证前端依赖
 echo ""
 echo "验证前端依赖..."
-if pnpm install --frozen-lockfile --dry-run; then
+if pnpm install --frozen-lockfile --ignore-scripts; then
     echo "✓ 前端依赖检查通过"
 else
     echo "✗ 前端依赖检查失败"
@@ -39,14 +41,12 @@ fi
 # 3. 验证Rust依赖
 echo ""
 echo "验证Rust依赖..."
-cd server
-if cargo check --locked 2>&1 | head -20; then
+if cargo check --locked --manifest-path server/Cargo.toml; then
     echo "✓ Rust依赖检查通过"
 else
     echo "✗ Rust依赖检查失败"
     exit 1
 fi
-cd ..
 
 # 4. 检查Dockerfile语法
 echo ""
@@ -54,7 +54,8 @@ echo "检查Dockerfile语法..."
 if docker build --check -f Dockerfile . 2>&1; then
     echo "✓ Dockerfile语法检查通过"
 else
-    echo "⚠ Dockerfile语法检查警告（可能需要实际构建才能发现）"
+    echo "✗ Dockerfile检查失败（需要支持 --check 的 Docker BuildKit）"
+    exit 1
 fi
 
 echo ""

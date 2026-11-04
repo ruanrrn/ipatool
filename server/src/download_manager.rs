@@ -214,6 +214,14 @@ impl DownloadManager {
         batch_id: i64,
         items: Vec<BatchItem<S>>,
     ) {
+        if db
+            .lock()
+            .unwrap()
+            .update_batch_task_progress(batch_id, 0, 0, "processing")
+            .is_err()
+        {
+            return;
+        }
         let mut completed_count = 0i64;
         let mut failed_count = 0i64;
 

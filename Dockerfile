@@ -3,7 +3,7 @@
 FROM node:22-alpine AS frontend-builder
 
 # 安装 pnpm
-RUN npm install -g pnpm@9
+RUN npm install -g pnpm@9.15.9
 
 # 设置工作目录
 WORKDIR /app
@@ -26,7 +26,7 @@ RUN pnpm run build && \
 # Rust 后端构建阶段
 FROM rust:1.86-slim AS backend-builder
 
-# rust:1.84-slim 镜像中 Cargo 已经在 /usr/local/cargo/bin
+# rust:1.86-slim 镜像中 Cargo 已经在 /usr/local/cargo/bin
 # 不需要设置额外的环境变量
 
 WORKDIR /app

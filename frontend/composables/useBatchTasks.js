@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { API_BASE } from '../config.js'
 import { apiFetch } from '../utils/api.js'
 
@@ -11,12 +11,12 @@ import { apiFetch } from '../utils/api.js'
  *   BatchDownloadItem: { id, batch_id, app_id, app_name, version, account_email,
  *                        status, progress, error, retry_count, created_at }
  *
- * Task status:  "processing" | "completed"
+ * Task status:  "pending" | "processing" | "completed" | "failed"
  * Item status:  "pending" | "completed" | "failed"
  *
  * 该 composable 负责：
  *   - 拉取批量任务列表 + 每个 task 展开后的 items
- *   - 轮询进行中的任务（status=processing）以更新进度
+ *   - 轮询进行中的任务（status=pending/processing）以更新进度
  *   - 删除任务
  */
 
@@ -29,9 +29,24 @@ export function useBatchTasks() {
   const loading = ref(false)
   const error = ref(null)
   let pollTimer = null
+  let polling = false
+  let disposed = false
+  let generation = 0
+  let listRequest = null
+  const controllers = new Set()
+  const itemRequests = new Map()
+  const request = async (url, options = {}) => {
+    const controller = new AbortController()
+    controllers.add(controller)
+    try {
+      return await apiFetch(url, { ...options, signal: controller.signal })
+    } finally {
+      controllers.delete(controller)
+    }
+  }
 
   const activeTasks = computed(() =>
-    tasks.value.filter(t => t.status === 'processing')
+    tasks.value.filter(t => ['pending', 'queued', 'processing', 'running'].includes(t.status))
   )
   const completedTasks = computed(() =>
     tasks.value.filter(t => t.status === 'completed')
@@ -39,35 +54,53 @@ export function useBatchTasks() {
   const hasAnyTasks = computed(() => tasks.value.length > 0)
 
   /** 拉取所有批量任务列表 */
-  async function fetchTasks() {
+  function fetchTasks() {
+    if (disposed) return Promise.resolve()
+    if (listRequest) return listRequest
+    const epoch = generation
     loading.value = true
     error.value = null
-    try {
-      const { data } = await apiFetch(`${API_BASE}/batch-tasks`)
-      if (data?.ok && Array.isArray(data.data)) {
-        tasks.value = data.data
-        // 展开的任务需要拉取 items
-        for (const id of expandedTaskIds.value) {
-          await fetchItems(id)
+    const pending = (async () => {
+      try {
+        const { data } = await request(`${API_BASE}/batch-tasks`)
+        if (disposed || epoch !== generation) return
+        if (data?.ok && Array.isArray(data.data)) {
+          tasks.value = data.data
+          await Promise.all([...expandedTaskIds.value].map(fetchItems))
         }
+      } catch (e) {
+        if (!disposed && epoch === generation) error.value = e?.message || '获取批量任务失败'
+      } finally {
+        if (!disposed && epoch === generation) loading.value = false
       }
-    } catch (e) {
-      error.value = e?.message || '获取批量任务失败'
-    } finally {
-      loading.value = false
-    }
+    })()
+    listRequest = pending
+    void pending.finally(() => {
+      if (listRequest === pending) listRequest = null
+    })
+    return pending
   }
 
-  /** 拉取单个任务的 items（仅展开时调用） */
-  async function fetchItems(batchId) {
-    try {
-      const { data } = await apiFetch(`${API_BASE}/batch-tasks/${batchId}`)
-      if (data?.ok && data.data?.items) {
-        itemCache.value = { ...itemCache.value, [batchId]: data.data.items }
+  /** Deduplicate expanded item requests and discard responses after cleanup. */
+  function fetchItems(batchId) {
+    if (disposed) return Promise.resolve()
+    if (itemRequests.has(batchId)) return itemRequests.get(batchId)
+    const epoch = generation
+    const pending = (async () => {
+      try {
+        const { data } = await request(`${API_BASE}/batch-tasks/${batchId}`)
+        if (!disposed && epoch === generation && data?.ok && data.data?.items) {
+          itemCache.value = { ...itemCache.value, [batchId]: data.data.items }
+        }
+      } catch {
+        // Retry on the next refresh.
       }
-    } catch {
-      // 静默失败，items 可在下次轮询时重试
-    }
+    })()
+    itemRequests.set(batchId, pending)
+    void pending.finally(() => {
+      if (itemRequests.get(batchId) === pending) itemRequests.delete(batchId)
+    })
+    return pending
   }
 
   /** 展开/收起任务详情 */
@@ -87,10 +120,11 @@ export function useBatchTasks() {
   /** 删除任务 */
   async function deleteTask(batchId) {
     try {
-      const { data } = await apiFetch(`${API_BASE}/batch-tasks/${batchId}`, {
+      const epoch = generation
+      const { data } = await request(`${API_BASE}/batch-tasks/${batchId}`, {
         method: 'DELETE',
       })
-      if (data?.ok) {
+      if (!disposed && epoch === generation && data?.ok) {
         tasks.value = tasks.value.filter(t => t.id !== batchId)
         const next = { ...itemCache.value }
         delete next[batchId]
@@ -112,22 +146,36 @@ export function useBatchTasks() {
     return Math.round((done / task.total_count) * 100)
   }
 
-  /** 启动轮询（仅当有 processing 任务时） */
+  /** Continue refreshing pending and running batches without overlapping requests. */
   function startPolling() {
-    stopPolling()
-    pollTimer = setInterval(async () => {
-      if (activeTasks.value.length > 0) {
-        await fetchTasks()
+    if (disposed || polling) return
+    polling = true
+    const epoch = generation
+    const tick = async () => {
+      if (!polling || disposed || epoch !== generation) return
+      if (activeTasks.value.length > 0) await fetchTasks()
+      if (polling && !disposed && epoch === generation) {
+        pollTimer = setTimeout(tick, POLL_INTERVAL_MS)
       }
-    }, POLL_INTERVAL_MS)
+    }
+    pollTimer = setTimeout(tick, POLL_INTERVAL_MS)
   }
 
   function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
-    }
+    polling = false
+    generation++
+    clearTimeout(pollTimer)
+    pollTimer = null
+    for (const controller of controllers) controller.abort()
+    controllers.clear()
+    listRequest = null
+    itemRequests.clear()
+    if (!disposed) loading.value = false
   }
+  onBeforeUnmount(() => {
+    stopPolling()
+    disposed = true
+  })
 
   return {
     tasks,

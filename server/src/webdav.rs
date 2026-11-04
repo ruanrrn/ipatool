@@ -126,14 +126,63 @@ pub async fn test_connection(target: &WebDAVTarget) -> Result<(), WebDAVError> {
     )))
 }
 
+/// Keep legacy/manual uploads unchanged. Only completed managed artifacts have the exact
+/// artifacts/<lowercase SHA256>/<canonical v4 UUID>/<name>.ipa layout.
+fn remote_filename(local_path: &Path) -> Result<String, WebDAVError> {
+    let filename = local_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| WebDAVError("无法解析文件名".to_string()))?;
+    let managed_execution = (|| {
+        let execution_dir = local_path.parent()?;
+        let execution = execution_dir.file_name()?.to_str()?;
+        let id = uuid::Uuid::parse_str(execution).ok()?;
+        if id.to_string() != execution || id.get_version_num() != 4 {
+            return None;
+        }
+        let account_dir = execution_dir.parent()?;
+        let account = account_dir.file_name()?.to_str()?;
+        if account.len() != 64
+            || !account
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || account_dir.parent()?.file_name()? != "artifacts"
+            || local_path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !filename.ends_with(".ipa")
+        {
+            return None;
+        }
+        Some(execution)
+    })();
+    let Some(execution) = managed_execution else {
+        return Ok(filename.to_string());
+    };
+
+    // A UUID keeps both accounts and repeated executions distinct without adding remote
+    // directories. Preserve the OTA @bundle.ipa suffix and truncate only the display name.
+    let (display, suffix) = filename
+        .rsplit_once('@')
+        .map(|(display, _)| (display, &filename[display.len()..]))
+        .unwrap_or((&filename[..filename.len() - 4], ".ipa"));
+    let budget = 255usize
+        .checked_sub(execution.len() + 1 + suffix.len())
+        .ok_or_else(|| {
+            WebDAVError("IPA bundle 后缀过长，无法生成唯一的 WebDAV 文件名".to_string())
+        })?;
+    let mut end = display.len().min(budget);
+    while !display.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(format!("{}-{}{}", &display[..end], execution, suffix))
+}
+
 /// 上传本地文件到 WebDAV。
 /// 自动创建目标目录（MKCOL），然后 PUT 文件。
 /// 返回上传后的完整 URL。
 pub async fn upload_file(target: &WebDAVTarget, local_path: &Path) -> Result<String, WebDAVError> {
-    let filename = local_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| WebDAVError("无法解析文件名".to_string()))?;
+    let filename = remote_filename(local_path)?;
 
     // 1. 确保目标目录存在（MKCOL，已存在不报错）
     let dir_url = target.dir_url();
@@ -175,7 +224,7 @@ pub async fn upload_file(target: &WebDAVTarget, local_path: &Path) -> Result<Str
     });
 
     // 3. PUT 上传
-    let file_url = target.file_url(filename);
+    let file_url = target.file_url(&filename);
     log::info!(
         "[webdav] uploading {} ({} bytes) -> {}",
         filename,
@@ -490,6 +539,148 @@ mod tests {
         assert_eq!(entries[2].path, "app.ipa");
     }
 
+    #[test]
+    fn managed_remote_names_preserve_suffix_and_bound_utf8_bytes() {
+        let execution = uuid::Uuid::new_v4().to_string();
+        let root = Path::new("downloads/artifacts")
+            .join("a".repeat(64))
+            .join(&execution);
+        let filename = format!("{}@com.example.app.ipa", "应用".repeat(60));
+        let name = remote_filename(&root.join(filename)).unwrap();
+        assert!(name.len() <= 255);
+        assert!(name.ends_with(&format!("-{}@com.example.app.ipa", execution)));
+        assert_eq!(
+            remote_filename(&root.join("App.ipa")).unwrap(),
+            format!("App-{}.ipa", execution)
+        );
+        assert!(remote_filename(&root.join(format!("App@{}.ipa", "b".repeat(240)))).is_err());
+    }
+
+    #[test]
+    fn external_and_legacy_paths_keep_original_remote_names() {
+        let execution = uuid::Uuid::new_v4().to_string();
+        let hash = "a".repeat(64);
+        for path in [
+            "downloads/App@bundle.ipa".to_string(),
+            format!(
+                "downloads/artifacts/not-a-hash/{}/App@bundle.ipa",
+                execution
+            ),
+            format!("downloads/artifacts/{}/not-a-uuid/App@bundle.ipa", hash),
+            format!("downloads/other/{}/{}/App@bundle.ipa", hash, execution),
+            format!(
+                "downloads/artifacts/{}/{}/extra/App@bundle.ipa",
+                hash, execution
+            ),
+            format!(
+                "downloads/../artifacts/{}/{}/App@bundle.ipa",
+                hash, execution
+            ),
+        ] {
+            assert_eq!(
+                remote_filename(Path::new(&path)).unwrap(),
+                "App@bundle.ipa",
+                "{}",
+                path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_uploads_keep_accounts_and_executions_distinct() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = std::env::temp_dir().join(format!("webdav-isolation-{}", uuid::Uuid::new_v4()));
+        let mut files = Vec::new();
+        for (account, body) in [
+            ('a', b"account-a-first".as_slice()),
+            ('b', b"account-b".as_slice()),
+            ('a', b"account-a-again".as_slice()),
+        ] {
+            let path = root
+                .join("artifacts")
+                .join(account.to_string().repeat(64))
+                .join(uuid::Uuid::new_v4().to_string())
+                .join("App-1@com.example.app.ipa");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            files.push((path, body.to_vec()));
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut uploads = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let header_end = loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    received.extend_from_slice(&buffer[..read]);
+                    if let Some(pos) = received.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&received[..header_end]);
+                let request = headers.lines().next().unwrap().to_string();
+                assert!(
+                    request.starts_with("PUT "),
+                    "unexpected request: {}",
+                    request
+                );
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while received.len() < header_end + length {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    received.extend_from_slice(&buffer[..read]);
+                }
+                uploads.push((request, received[header_end..header_end + length].to_vec()));
+                socket
+                    .write_all(
+                        b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+            uploads
+        });
+        let target = WebDAVTarget {
+            url: format!("http://{}", address),
+            username: String::new(),
+            password: String::new(),
+            remote_path: "/".to_string(),
+        };
+        let mut urls = std::collections::HashSet::new();
+        for (path, _) in &files {
+            let url = tokio::time::timeout(Duration::from_secs(10), upload_file(&target, path))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(url.ends_with("@com.example.app.ipa"));
+            assert!(urls.insert(url));
+        }
+        let uploads = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut requests = std::collections::HashSet::new();
+        for ((request, body), (path, expected)) in uploads.into_iter().zip(&files) {
+            let expected_path = format!("/{}", remote_filename(path).unwrap());
+            assert_eq!(request, format!("PUT {} HTTP/1.1", expected_path));
+            assert!(requests.insert(request));
+            assert_eq!(&body, expected);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn upload_streams_file_with_content_length() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -542,7 +733,10 @@ mod tests {
         let (headers, body) = server.await.unwrap();
         let _ = std::fs::remove_file(&path);
 
-        assert!(remote_url.ends_with(".ipa"));
+        assert_eq!(
+            remote_url,
+            target.file_url(path.file_name().unwrap().to_str().unwrap())
+        );
         assert!(headers.starts_with("put "));
         assert!(!headers.contains("transfer-encoding: chunked"));
         assert_eq!(body, content);

@@ -572,37 +572,38 @@ export function useDownload(options = {}) {
   }
 
   // ===== Polling Fallback =====
+  const pollingItems = new Map()
+  const { startPolling: startFallbackPolling } = useJobPolling({
+    pollInterval: 1500,
+    maxFailures: 5,
+    onUpdate: (taskId, snapshot) => {
+      if (snapshot.progress != null) {
+        progressPercent.value = snapshot.progress
+        appStore.updateQueueItem(taskId, { progress: snapshot.progress })
+      }
+      if (snapshot.stage) {
+        progressStage.value = localizeProgressStage(snapshot.stage)
+        appStore.updateQueueItem(taskId, { stage: progressStage.value })
+      }
+      if (snapshot.error) addLog(`[错误] ${snapshot.error}`)
+    },
+    onComplete: (taskId, snapshot) => {
+      const item = pollingItems.get(taskId)
+      pollingItems.delete(taskId)
+      handleDownloadComplete(taskId, item, snapshot)
+    },
+    onFailed: (taskId, snapshot) => finishPollingFailure(taskId, snapshot.error || '任务失败'),
+    onInterrupted: (taskId, reason) => finishPollingFailure(taskId, reason)
+  })
+  const finishPollingFailure = (taskId, reason) => {
+    const item = pollingItems.get(taskId)
+    pollingItems.delete(taskId)
+    handleDownloadFailed(taskId, item, reason)
+  }
   const pollJobStatus = (jobId, queueItem) => {
     addLog('[进度] SSE 不可用，自动切换为轮询模式')
-
-    const { startPolling } = useJobPolling({
-      pollInterval: 1500,
-      maxFailures: 5,
-      isFinalStatus: (status) => ['completed', 'ready', 'failed', 'error'].includes(status),
-      onUpdate: (taskId, snapshot) => {
-        if (snapshot.progress != null) {
-          progressPercent.value = snapshot.progress
-          appStore.updateQueueItem(jobId, { progress: snapshot.progress })
-        }
-
-        if (snapshot.stage) {
-          progressStage.value = localizeProgressStage(snapshot.stage)
-          appStore.updateQueueItem(jobId, { stage: progressStage.value })
-        }
-
-        if (snapshot.error) {
-          addLog(`[错误] ${snapshot.error}`)
-        }
-      },
-      onComplete: (taskId, snapshot) => {
-        handleDownloadComplete(taskId, queueItem, snapshot)
-      },
-      onFailed: (taskId, snapshot) => {
-        handleDownloadFailed(taskId, queueItem, snapshot.error || '任务失败')
-      }
-    })
-
-    startPolling(jobId)
+    pollingItems.set(jobId, queueItem)
+    startFallbackPolling(jobId)
   }
 
   // ===== Download Handlers =====
@@ -862,6 +863,7 @@ export function useDownload(options = {}) {
 
   // Cleanup on unmount
   onBeforeUnmount(() => {
+    pollingItems.clear()
     if (activeEventSource) {
       activeEventSource.close()
       activeEventSource = null

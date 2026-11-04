@@ -244,9 +244,9 @@ const removeTask = async (id) => {
   const isActive = !isFinalStatus(task.status)
   if (isActive) {
     const confirmed = await Confirm.show({
-      title: '确认取消任务',
-      message: `任务「${task.appName || '未知'}」仍在进行中，确定取消吗？`,
-      confirmText: '取消任务',
+      title: '从列表移除任务',
+      message: `任务「${task.appName || '未知'}」仍在进行中。移除后后台下载和 WebDAV 上传会继续，确定从列表移除吗？`,
+      confirmText: '从列表移除',
       cancelText: '继续等待',
       type: 'danger'
     })

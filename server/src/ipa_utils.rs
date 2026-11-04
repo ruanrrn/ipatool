@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use crate::signature::{read_bounded, MAX_ICON_BYTES, MAX_PLIST_BYTES};
 use std::path::Path;
 
 /// 完整的 IPA 元数据结构体
@@ -145,9 +145,9 @@ fn extract_largest_app_icon_from_zip<R: std::io::Read + std::io::Seek>(
 
     for suffix in priorities {
         let icon_path = format!("{}{}", icon_prefix, suffix);
-        if let Ok(mut entry) = zip.by_name(&icon_path) {
-            let mut data = Vec::new();
-            if entry.read_to_end(&mut data).is_ok() {
+        if let Ok(entry) = zip.by_name(&icon_path) {
+            let size = entry.size();
+            if let Ok(data) = read_bounded(entry, size, MAX_ICON_BYTES) {
                 // 验证是 PNG (以 0x89504E47 开头)
                 if data.len() > 8 && data[0..4] == [0x89, 0x50, 0x4E, 0x47] {
                     return Some(data);
@@ -167,17 +167,12 @@ fn extract_largest_app_icon_from_zip<R: std::io::Read + std::io::Seek>(
         };
         let name = entry.name().to_string();
         if name.contains("AppIcon") && name.ends_with(".png") && entry.is_file() {
-            let mut data = Vec::new();
-            drop(entry); // must drop before re-borrowing zip
-            let mut entry = match zip.by_name(&name) {
-                Ok(e) => e,
+            let size = entry.size();
+            let data = match read_bounded(entry, size, MAX_ICON_BYTES) {
+                Ok(data) => data,
                 Err(_) => continue,
             };
-            if std::io::Read::read_to_end(&mut entry, &mut data).is_ok()
-                && data.len() > best_size
-                && data.len() > 8
-                && data[0..4] == [0x89, 0x50, 0x4E, 0x47]
-            {
+            if data.len() > best_size && data.len() > 8 && data[0..4] == [0x89, 0x50, 0x4E, 0x47] {
                 best_size = data.len();
                 best_icon = Some(data);
             }
@@ -210,9 +205,9 @@ pub fn read_plist_from_zip<R: std::io::Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Option<plist::Value> {
-    let mut file = zip.by_name(path).ok()?;
-    let mut content = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut content).ok()?;
+    let file = zip.by_name(path).ok()?;
+    let size = file.size();
+    let content = read_bounded(file, size, MAX_PLIST_BYTES).ok()?;
     plist::from_bytes(&content).ok()
 }
 
@@ -236,5 +231,36 @@ fn plist_bool_value(plist: &plist::Value, key: &str) -> Option<bool> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn oversized_icon_is_skipped_and_normal_icon_is_preserved() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .start_file("Payload/Test.app/AppIcon60x60/@3x.png", options)
+            .unwrap();
+        let chunk = [0u8; 8192];
+        for _ in 0..(MAX_ICON_BYTES / chunk.len() as u64 + 1) {
+            writer.write_all(&chunk).unwrap();
+        }
+        let png = b"\x89PNG\r\n\x1a\nnormal-icon";
+        writer
+            .start_file("Payload/Test.app/AppIcon60x60/@2x.png", options)
+            .unwrap();
+        writer.write_all(png).unwrap();
+        let mut zip =
+            zip::ZipArchive::new(Cursor::new(writer.finish().unwrap().into_inner())).unwrap();
+        assert_eq!(
+            extract_largest_app_icon_from_zip(&mut zip, "Test.app").unwrap(),
+            png
+        );
     }
 }

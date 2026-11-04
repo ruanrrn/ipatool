@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config frontend/vite.config.js",
-    "dev:rust": "./dev-rust.sh",
+    "dev:rust": "cargo run --locked --manifest-path server/Cargo.toml --bin server",
     "build": "vite build --config frontend/vite.config.js",
-    "build:rust": "./build-rust.sh",
+    "build:rust": "cargo build --release --locked --manifest-path server/Cargo.toml --bin server",
     "preview": "vite preview --config frontend/vite.config.js",
     "version:sync": "scripts/sync-version.sh",
     "version:patch": "npm version patch && scripts/sync-version.sh",
@@ -16,26 +16,30 @@
     "lint": "eslint frontend/ --config frontend/eslint.config.js",
     "lint:fix": "eslint frontend/ --fix",
     "format": "prettier --config frontend/.prettierrc --write \"frontend/**/*.{vue,js,json,css}\"",
-    "lint:tokens": "bash scripts/check-no-hardcoded-colors.sh"
+    "lint:tokens": "bash scripts/check-no-hardcoded-colors.sh",
+    "test": "node --test frontend/tests/*.test.mjs"
   },
   "dependencies": {
     "@radix-ui/colors": "^3.0.0",
-    "@vueuse/core": "^14.2.0",
-    "pinia": "^2.3.0",
-    "puppeteer-core": "^24.42.0",
-    "vue": "^3.5.13"
+    "@vueuse/core": "^14.4.0",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.44"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@vitejs/plugin-vue": "^5.2.1",
-    "autoprefixer": "^10.4.20",
-    "eslint": "^10.1.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "autoprefixer": "^10.6.2",
+    "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-vue": "^10.8.0",
-    "globals": "^17.4.0",
-    "postcss": "^8.4.49",
-    "prettier": "^3.8.1",
-    "tailwindcss": "^3.4.17",
-    "vite": "^6.0.11"
+    "eslint-plugin-vue": "^10.12.0",
+    "globals": "^17.14.0",
+    "postcss": "^8.5.32",
+    "prettier": "^3.9.10",
+    "puppeteer-core": "^25.16.0",
+    "tailwindcss": "^3.4.19",
+    "vite": "^6.4.5"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24"
   }
 }

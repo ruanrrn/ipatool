@@ -141,14 +141,39 @@ fn find_app_bundle_name<R: Read + Seek>(
     Err("Could not find app bundle".into())
 }
 
+pub(crate) const MAX_PLIST_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_ICON_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Check both the directory's declared size and the actual decompressed stream.
+pub(crate) fn read_bounded<R: Read>(
+    mut reader: R,
+    declared: u64,
+    limit: u64,
+) -> std::io::Result<Vec<u8>> {
+    if declared > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ZIP entry exceeds size limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    reader.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ZIP entry exceeds size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn read_zip_entry_bytes<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut file = zip.by_name(path)?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
-    Ok(content)
+    let file = zip.by_name(path)?;
+    let size = file.size();
+    Ok(read_bounded(file, size, MAX_PLIST_BYTES)?)
 }
 
 fn read_zip_plist<R: Read + Seek>(
@@ -193,7 +218,15 @@ fn read_manifest_targets<R: Read + Seek>(
     let manifest_path = format!("Payload/{}/SC_Info/Manifest.plist", app_bundle_name);
     let manifest = match read_zip_plist(zip, &manifest_path) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if matches!(
+                zip.by_name(&manifest_path),
+                Err(zip::result::ZipError::FileNotFound)
+            ) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
     };
     Ok(Some(manifest_targets_from_value(&manifest)))
 }
@@ -205,7 +238,15 @@ fn read_bundle_executable<R: Read + Seek>(
     let info_path = format!("Payload/{}/Info.plist", app_bundle_name);
     let info = match read_zip_plist(zip, &info_path) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if matches!(
+                zip.by_name(&info_path),
+                Err(zip::result::ZipError::FileNotFound)
+            ) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
     };
 
     let executable = match info {
@@ -226,7 +267,15 @@ fn read_bundle_identifier<R: Read + Seek>(
     let info_path = format!("Payload/{}/Info.plist", app_bundle_name);
     let info = match read_zip_plist(zip, &info_path) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if matches!(
+                zip.by_name(&info_path),
+                Err(zip::result::ZipError::FileNotFound)
+            ) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
     };
 
     let bundle_id = match info {
@@ -464,102 +513,182 @@ fn read_u32(bytes: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
     })
 }
 
-fn parse_macho_load_commands(bytes: &[u8], little_endian: bool, is_64: bool) -> Option<bool> {
-    let header_size = if is_64 { 32 } else { 28 };
-    let ncmds = read_u32(bytes, 16, little_endian)? as usize;
-    let mut offset = header_size;
+const MAX_LOAD_COMMAND_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_FAT_ARCHES: u32 = 64;
 
-    for _ in 0..ncmds {
-        let cmd = read_u32(bytes, offset, little_endian)?;
-        let cmdsize = read_u32(bytes, offset + 4, little_endian)? as usize;
-        if cmdsize < 8 || offset.checked_add(cmdsize)? > bytes.len() {
-            return None;
-        }
-        if matches!(cmd, LC_ENCRYPTION_INFO | LC_ENCRYPTION_INFO_64) {
-            let cryptid = read_u32(bytes, offset + 16, little_endian)?;
-            return Some(cryptid == 1);
-        }
-        offset += cmdsize;
+type InspectionError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Read only headers and load commands. ZIP streams cannot seek, so ranges are
+/// reached with a fixed-size discard buffer; large executable payloads stay on disk.
+fn macho_from_ranges(
+    size: u64,
+    read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>, InspectionError>,
+) -> Result<bool, InspectionError> {
+    let header = read(0, 8)?;
+    let magic = read_u32(&header, 0, false).ok_or("Missing Mach-O magic")?;
+    let (little, fat64) = match magic {
+        FAT_MAGIC => (false, false),
+        FAT_CIGAM => (true, false),
+        FAT_MAGIC_64 => (false, true),
+        FAT_CIGAM_64 => (true, true),
+        _ => return thin_macho_from_ranges(0, size, read),
+    };
+    let count = read_u32(&header, 4, little).ok_or("Missing FAT count")?;
+    if count == 0 || count > MAX_FAT_ARCHES {
+        return Err("Invalid FAT architecture count".into());
     }
-
-    Some(false)
+    let arch_size = if fat64 { 32 } else { 20 };
+    let table_end = 8 + u64::from(count) * arch_size as u64;
+    if table_end > size {
+        return Err("Truncated FAT table".into());
+    }
+    let table = read(8, count as usize * arch_size)?;
+    let mut slices = Vec::new();
+    for arch in table.chunks_exact(arch_size) {
+        let get64 = |offset| -> Result<u64, InspectionError> {
+            let raw: [u8; 8] = arch[offset..offset + 8].try_into()?;
+            Ok(if little {
+                u64::from_le_bytes(raw)
+            } else {
+                u64::from_be_bytes(raw)
+            })
+        };
+        let (offset, len) = if fat64 {
+            (get64(8)?, get64(16)?)
+        } else {
+            (
+                u64::from(read_u32(arch, 8, little).unwrap()),
+                u64::from(read_u32(arch, 12, little).unwrap()),
+            )
+        };
+        let end = offset.checked_add(len).ok_or("FAT slice overflow")?;
+        if offset < table_end || len < 28 || end > size {
+            return Err("Invalid FAT slice bounds".into());
+        }
+        slices.push((offset, len));
+    }
+    slices.sort_unstable();
+    let mut previous_end = table_end;
+    let mut encrypted = false;
+    for (offset, len) in slices {
+        if offset < previous_end {
+            return Err("Overlapping FAT slices".into());
+        }
+        previous_end = offset + len;
+        encrypted |= thin_macho_from_ranges(offset, len, read)?;
+    }
+    Ok(encrypted)
 }
 
-fn macho_cryptid_one(bytes: &[u8]) -> Option<bool> {
-    let magic_be = read_u32(bytes, 0, false)?;
-    let magic_le = read_u32(bytes, 0, true)?;
-
-    match magic_le {
-        MH_MAGIC => return parse_macho_load_commands(bytes, true, false),
-        MH_MAGIC_64 => return parse_macho_load_commands(bytes, true, true),
-        FAT_CIGAM => {
-            let nfat_arch = read_u32(bytes, 4, true)? as usize;
-            for index in 0..nfat_arch {
-                let arch_offset = 8 + index * 20;
-                let slice_offset = read_u32(bytes, arch_offset + 8, true)? as usize;
-                let slice_size = read_u32(bytes, arch_offset + 12, true)? as usize;
-                let slice = bytes.get(slice_offset..slice_offset.checked_add(slice_size)?)?;
-                if macho_cryptid_one(slice)? {
-                    return Some(true);
-                }
-            }
-            return Some(false);
-        }
-        FAT_CIGAM_64 => {
-            let nfat_arch = read_u32(bytes, 4, true)? as usize;
-            for index in 0..nfat_arch {
-                let arch_offset = 8 + index * 32;
-                let hi = read_u32(bytes, arch_offset + 8, true)? as u64;
-                let lo = read_u32(bytes, arch_offset + 12, true)? as u64;
-                let size_hi = read_u32(bytes, arch_offset + 16, true)? as u64;
-                let size_lo = read_u32(bytes, arch_offset + 20, true)? as u64;
-                let slice_offset = ((hi << 32) | lo) as usize;
-                let slice_size = ((size_hi << 32) | size_lo) as usize;
-                let slice = bytes.get(slice_offset..slice_offset.checked_add(slice_size)?)?;
-                if macho_cryptid_one(slice)? {
-                    return Some(true);
-                }
-            }
-            return Some(false);
-        }
-        _ => {}
+fn thin_macho_from_ranges(
+    base: u64,
+    size: u64,
+    read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>, InspectionError>,
+) -> Result<bool, InspectionError> {
+    if size < 28 {
+        return Err("Truncated Mach-O header".into());
     }
-
-    match magic_be {
-        MH_CIGAM => parse_macho_load_commands(bytes, false, false),
-        MH_CIGAM_64 => parse_macho_load_commands(bytes, false, true),
-        FAT_MAGIC => {
-            let nfat_arch = read_u32(bytes, 4, false)? as usize;
-            for index in 0..nfat_arch {
-                let arch_offset = 8 + index * 20;
-                let slice_offset = read_u32(bytes, arch_offset + 8, false)? as usize;
-                let slice_size = read_u32(bytes, arch_offset + 12, false)? as usize;
-                let slice = bytes.get(slice_offset..slice_offset.checked_add(slice_size)?)?;
-                if macho_cryptid_one(slice)? {
-                    return Some(true);
-                }
-            }
-            Some(false)
-        }
-        FAT_MAGIC_64 => {
-            let nfat_arch = read_u32(bytes, 4, false)? as usize;
-            for index in 0..nfat_arch {
-                let arch_offset = 8 + index * 32;
-                let hi = read_u32(bytes, arch_offset + 8, false)? as u64;
-                let lo = read_u32(bytes, arch_offset + 12, false)? as u64;
-                let size_hi = read_u32(bytes, arch_offset + 16, false)? as u64;
-                let size_lo = read_u32(bytes, arch_offset + 20, false)? as u64;
-                let slice_offset = ((hi << 32) | lo) as usize;
-                let slice_size = ((size_hi << 32) | size_lo) as usize;
-                let slice = bytes.get(slice_offset..slice_offset.checked_add(slice_size)?)?;
-                if macho_cryptid_one(slice)? {
-                    return Some(true);
-                }
-            }
-            Some(false)
-        }
-        _ => None,
+    let header = read(base, 28)?;
+    let magic = read_u32(&header, 0, false).ok_or("Missing Mach-O magic")?;
+    let (little, is64) = match magic {
+        MH_MAGIC => (false, false),
+        MH_CIGAM => (true, false),
+        MH_MAGIC_64 => (false, true),
+        MH_CIGAM_64 => (true, true),
+        _ => return Err("Unsupported Mach-O magic".into()),
+    };
+    let header_size = if is64 { 32 } else { 28 };
+    let count = u64::from(read_u32(&header, 16, little).unwrap());
+    let command_size = u64::from(read_u32(&header, 20, little).unwrap());
+    if command_size > MAX_LOAD_COMMAND_BYTES
+        || count > command_size / 8
+        || header_size + command_size > size
+    {
+        return Err("Invalid Mach-O load command bounds".into());
     }
+    let commands = read(base + header_size, command_size as usize)?;
+    let mut offset = 0usize;
+    let mut encrypted = false;
+    for _ in 0..count {
+        let cmd = read_u32(&commands, offset, little).ok_or("Truncated load command")?;
+        let len = read_u32(&commands, offset + 4, little).ok_or("Truncated load command")? as usize;
+        let end = offset.checked_add(len).ok_or("Load command overflow")?;
+        if len < 8 || end > commands.len() {
+            return Err("Invalid load command size".into());
+        }
+        if matches!(cmd, LC_ENCRYPTION_INFO | LC_ENCRYPTION_INFO_64) {
+            let minimum = if cmd == LC_ENCRYPTION_INFO_64 { 24 } else { 20 };
+            if len < minimum {
+                return Err("Truncated encryption command".into());
+            }
+            encrypted |= read_u32(&commands, offset + 16, little).ok_or("Missing cryptid")? != 0;
+        }
+        offset = end;
+    }
+    if offset != commands.len() {
+        return Err("Inconsistent load command size".into());
+    }
+    Ok(encrypted)
+}
+
+fn inspect_binary<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    path: &str,
+) -> Result<bool, InspectionError> {
+    let mut entry = zip.by_name(path)?;
+    let size = entry.size();
+    // Cache the small prefix containing any FAT architecture table. Subsequent
+    // sorted slices are consumed once, even when they lie gigabytes apart.
+    let mut prefix = vec![0; size.min(8 + u64::from(MAX_FAT_ARCHES) * 32) as usize];
+    entry.read_exact(&mut prefix)?;
+    let mut position = prefix.len() as u64;
+    macho_from_ranges(size, &mut |offset, length| {
+        if offset
+            .checked_add(length as u64)
+            .filter(|end| *end <= size)
+            .is_none()
+        {
+            return Err("Mach-O range exceeds ZIP entry".into());
+        }
+        let mut bytes = Vec::with_capacity(length);
+        let cached = (prefix.len() as u64)
+            .saturating_sub(offset)
+            .min(length as u64) as usize;
+        if cached > 0 {
+            bytes.extend_from_slice(&prefix[offset as usize..offset as usize + cached]);
+        }
+        if cached == length {
+            return Ok(bytes);
+        }
+        let next = offset + cached as u64;
+        if next < position {
+            return Err("Nonsequential Mach-O range".into());
+        }
+        let skip = next - position;
+        let skipped = std::io::copy(&mut entry.by_ref().take(skip), &mut std::io::sink())?;
+        if skipped != skip {
+            return Err("Truncated executable".into());
+        }
+        bytes.resize(length, 0);
+        entry.read_exact(&mut bytes[cached..])?;
+        position = offset + length as u64;
+        Ok(bytes)
+    })
+}
+
+fn inspect_bundle<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    prefix: &str,
+) -> Result<Option<String>, InspectionError> {
+    let info = read_zip_plist(zip, &format!("{prefix}/Info.plist"))?;
+    let executable = info
+        .as_dictionary()
+        .and_then(|dict| dict.get("CFBundleExecutable"))
+        .and_then(Value::as_string)
+        .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+        .ok_or("Missing or invalid CFBundleExecutable")?;
+    let binary = format!("{prefix}/{executable}");
+    Ok(inspect_binary(zip, &binary)?.then(|| binary.trim_start_matches("Payload/").to_string()))
 }
 
 pub fn inspect_ipa_path(
@@ -598,36 +727,12 @@ pub fn inspect_ipa_path(
         .collect::<Vec<_>>();
 
     let mut encrypted_binaries = Vec::new();
-    let app_info_path = format!("Payload/{}/Info.plist", app_bundle_name);
-    if let Ok(Value::Dictionary(info)) = read_zip_plist(&mut zip, &app_info_path) {
-        if let Some(executable) = info
-            .get("CFBundleExecutable")
-            .and_then(|value| value.as_string())
-        {
-            let binary_path = format!("Payload/{}/{}", app_bundle_name, executable);
-            if let Ok(binary) = read_zip_entry_bytes(&mut zip, &binary_path) {
-                if macho_cryptid_one(&binary).unwrap_or(false) {
-                    encrypted_binaries.push(binary_path.trim_start_matches("Payload/").to_string());
-                }
-            }
-        }
+    if let Some(binary) = inspect_bundle(&mut zip, app_prefix.trim_end_matches('/'))? {
+        encrypted_binaries.push(binary);
     }
-
     for plugin_dir in ordered_unique_paths(plugin_dirs) {
-        let info_path = format!("{}/Info.plist", plugin_dir);
-        if let Ok(Value::Dictionary(info)) = read_zip_plist(&mut zip, &info_path) {
-            if let Some(executable) = info
-                .get("CFBundleExecutable")
-                .and_then(|value| value.as_string())
-            {
-                let binary_path = format!("{}/{}", plugin_dir, executable);
-                if let Ok(binary) = read_zip_entry_bytes(&mut zip, &binary_path) {
-                    if macho_cryptid_one(&binary).unwrap_or(false) {
-                        encrypted_binaries
-                            .push(binary_path.trim_start_matches("Payload/").to_string());
-                    }
-                }
-            }
+        if let Some(binary) = inspect_bundle(&mut zip, &plugin_dir)? {
+            encrypted_binaries.push(binary);
         }
     }
 
@@ -1041,6 +1146,221 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn thin_macho(little: bool, is64: bool, cryptid: u32) -> Vec<u8> {
+        let mut bytes = vec![0; if is64 { 32 } else { 28 }];
+        let put = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&if little {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
+        };
+        put(&mut bytes, 0, if is64 { MH_MAGIC_64 } else { MH_MAGIC });
+        put(&mut bytes, 16, 1);
+        let cmdsize = if is64 { 24 } else { 20 };
+        put(&mut bytes, 20, cmdsize);
+        let offset = bytes.len();
+        bytes.resize(offset + cmdsize as usize, 0);
+        put(
+            &mut bytes,
+            offset,
+            if is64 {
+                LC_ENCRYPTION_INFO_64
+            } else {
+                LC_ENCRYPTION_INFO
+            },
+        );
+        put(&mut bytes, offset + 4, cmdsize);
+        put(&mut bytes, offset + 16, cryptid);
+        bytes
+    }
+
+    fn inspect_bytes(bytes: &[u8]) -> Result<bool, InspectionError> {
+        macho_from_ranges(bytes.len() as u64, &mut |offset, size| {
+            Ok(bytes
+                .get(offset as usize..offset as usize + size)
+                .ok_or("range")?
+                .to_vec())
+        })
+    }
+
+    #[test]
+    fn bounded_reads_check_declared_and_actual_sizes() {
+        assert_eq!(read_bounded(Cursor::new(b"1234"), 4, 4).unwrap(), b"1234");
+        assert!(read_bounded(Cursor::new(b"12345"), 4, 4).is_err());
+        assert!(read_bounded(Cursor::new(b""), 5, 4).is_err());
+    }
+
+    #[test]
+    fn macho_supports_both_endians_and_header_widths_without_reading_payload() {
+        for little in [false, true] {
+            for is64 in [false, true] {
+                for cryptid in [0, 1] {
+                    let bytes = thin_macho(little, is64, cryptid);
+                    // A virtual 8 GiB binary: any attempt to read payload fails.
+                    assert_eq!(
+                        macho_from_ranges(8 * 1024 * 1024 * 1024, &mut |offset, size| {
+                            Ok(bytes
+                                .get(offset as usize..offset as usize + size)
+                                .ok_or("payload read")?
+                                .to_vec())
+                        })
+                        .unwrap(),
+                        cryptid != 0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fat_macho_uses_u64_endian_offsets_and_checks_all_slices() {
+        for little in [false, true] {
+            for fat64 in [false, true] {
+                let offset = if fat64 { (1u64 << 32) + 4096 } else { 4096 };
+                let thin = thin_macho(true, true, 1);
+                let mut table = vec![0; if fat64 { 40 } else { 28 }];
+                let encode = |v: u32| {
+                    if little {
+                        v.to_le_bytes()
+                    } else {
+                        v.to_be_bytes()
+                    }
+                };
+                table[..4].copy_from_slice(&encode(if fat64 { FAT_MAGIC_64 } else { FAT_MAGIC }));
+                table[4..8].copy_from_slice(&encode(1));
+                if fat64 {
+                    table[16..24].copy_from_slice(&if little {
+                        offset.to_le_bytes()
+                    } else {
+                        offset.to_be_bytes()
+                    });
+                    table[24..32].copy_from_slice(&if little {
+                        (thin.len() as u64).to_le_bytes()
+                    } else {
+                        (thin.len() as u64).to_be_bytes()
+                    });
+                } else {
+                    table[16..20].copy_from_slice(&encode(offset as u32));
+                    table[20..24].copy_from_slice(&encode(thin.len() as u32));
+                }
+                assert!(
+                    macho_from_ranges(offset + thin.len() as u64, &mut |at, count| {
+                        let data = if at < offset {
+                            table.get(at as usize..at as usize + count)
+                        } else {
+                            thin.get((at - offset) as usize..(at - offset) as usize + count)
+                        };
+                        Ok(data.ok_or("unexpected range")?.to_vec())
+                    })
+                    .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zip_macho_streams_fat_slices_and_preserves_install_decision() {
+        let thin = thin_macho(true, true, 0);
+        let mut fat = vec![0; 4096];
+        fat[..4].copy_from_slice(&FAT_MAGIC.to_be_bytes());
+        fat[4..8].copy_from_slice(&2u32.to_be_bytes());
+        fat[16..20].copy_from_slice(&4096u32.to_be_bytes());
+        fat[20..24].copy_from_slice(&(thin.len() as u32).to_be_bytes());
+        fat[36..40].copy_from_slice(&8192u32.to_be_bytes());
+        fat[40..44].copy_from_slice(&(thin.len() as u32).to_be_bytes());
+        fat.extend_from_slice(&thin);
+        fat.resize(8192, 0);
+        fat.extend_from_slice(&thin_macho(false, true, 1));
+        for compression in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer
+                .start_file(
+                    "Exec",
+                    zip::write::SimpleFileOptions::default().compression_method(compression),
+                )
+                .unwrap();
+            writer.write_all(&fat).unwrap();
+            let bytes = writer.finish().unwrap().into_inner();
+            let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+            assert!(inspect_binary(&mut zip, "Exec").unwrap());
+        }
+        let client = client_for_archive(
+            write_zip(vec![
+                ("Payload/Test.app/", Vec::new()),
+                ("Payload/Test.app/Info.plist", info_plist("Exec")),
+                ("Payload/Test.app/Exec", thin),
+                ("Payload/Test.app/embedded.mobileprovision", Vec::new()),
+            ]),
+            None,
+            Vec::new(),
+        );
+        assert!(
+            inspect_ipa_path(Path::new(&client.filename))
+                .unwrap()
+                .direct_install_ok
+        );
+        let _ = std::fs::remove_file(&client.filename);
+    }
+
+    #[test]
+    fn malformed_macho_lengths_and_counts_fail_closed() {
+        let mut bytes = thin_macho(true, true, 1);
+        bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(inspect_bytes(&bytes).is_err());
+        let mut bytes = thin_macho(true, true, 1);
+        bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(inspect_bytes(&bytes).is_err());
+        let mut bytes = thin_macho(true, true, 1);
+        bytes[36..40].copy_from_slice(&8u32.to_le_bytes());
+        assert!(inspect_bytes(&bytes).is_err());
+        let mut fat = vec![0; 40];
+        fat[..4].copy_from_slice(&FAT_MAGIC_64.to_be_bytes());
+        fat[4..8].copy_from_slice(&1u32.to_be_bytes());
+        fat[16..24].copy_from_slice(&(u64::MAX - 1).to_be_bytes());
+        fat[24..32].copy_from_slice(&32u64.to_be_bytes());
+        assert!(inspect_bytes(&fat).is_err());
+        fat[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(inspect_bytes(&fat).is_err());
+    }
+
+    #[test]
+    fn oversized_compressed_plist_is_rejected_and_inspection_errors() {
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut output);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.add_directory("Payload/Test.app/", options).unwrap();
+            writer
+                .start_file("Payload/Test.app/Info.plist", options)
+                .unwrap();
+            let chunk = [b' '; 8192];
+            for _ in 0..(MAX_PLIST_BYTES / chunk.len() as u64 + 1) {
+                writer.write_all(&chunk).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut archive = ZipArchive::new(Cursor::new(output.into_inner())).unwrap();
+        assert!(read_zip_plist(&mut archive, "Payload/Test.app/Info.plist").is_err());
+        let mut client = client_for_archive(
+            write_zip(vec![
+                ("Payload/Test.app/", Vec::new()),
+                ("Payload/Test.app/Info.plist", info_plist("Exec")),
+                ("Payload/Test.app/Exec", b"invalid".to_vec()),
+                ("Payload/Test.app/embedded.mobileprovision", Vec::new()),
+            ]),
+            None,
+            Vec::new(),
+        );
+        assert!(inspect_ipa_path(Path::new(&client.filename)).is_err());
+        let _ = std::fs::remove_file(&client.filename);
+        client.staged_entries.clear();
+    }
 
     fn empty_metadata() -> SignatureMetadata {
         SignatureMetadata {
