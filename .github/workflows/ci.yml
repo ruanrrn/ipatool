@@ -15,7 +15,7 @@ jobs:
         working-directory: server
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -24,9 +24,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
 
   kbsync-helper-build:
     name: Kbsync Helper Build
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          version: 9.15.9
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -54,6 +54,6 @@ jobs:
         run: pnpm run lint
       - name: Design token lint
         run: pnpm run lint:tokens
-      - name: Purchase status regressions
-        run: node --test frontend/tests/purchase-status.test.mjs
+      - name: Frontend regressions
+        run: pnpm test
       - run: pnpm run build

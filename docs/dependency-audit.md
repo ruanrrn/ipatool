@@ -1,0 +1,9 @@
+# Dependency audit (2026-11-04)
+
+The lockfile was refreshed within existing compatible version ranges, including Vue 3.5.44, PostCSS 8.5.32 and Vite 6.4.5. `puppeteer-core` is a development-only dependency of `scripts/mobile-download-regression.cjs`; it is not imported by the browser application. Its official 25.16.0 release removes the old archive/proxy dependency chain and upgrades the BiDi validation dependency. No dependency overrides are used.
+
+`pnpm audit --json` reports **1 moderate, 0 high** advisory (previously 9 moderate and 13 high). `pnpm audit --prod --json` reports **0 advisories**. These are registry audit results at this date, not a guarantee against future vulnerabilities.
+
+The remaining advisory is [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249), minimatch 10.2.6 globparts amplification. ESLint 10.14.0 (the current official latest release) and its config-array dependency require minimatch 10; the published fix requires 11.0.1. This chain runs during developer/CI linting and is not included in the Vite browser bundle or Rust server. Exploitation requires feeding adversarial glob patterns/input into this tooling; lint configuration and file patterns remain trusted inputs. Upgrade ESLint/config-array when they officially adopt a patched minimatch. Forcing minimatch 11 into their version-10 contracts is intentionally avoided.
+
+Validation: lint, token lint, frontend tests and production build; pnpm 9.15.9 frozen installation of lockfile format 9; Puppeteer CommonJS loading plus local Chromium connect/page/mobile viewport/cookie/evaluate/screenshot APIs with an in-memory page. No Apple account or real download regression was invoked. Node.js 22.13+ or 24+ is the frontend development/build toolchain requirement; Docker uses Node 22 and CI uses Node 24. CI and Docker both install pnpm 9.15.9. Rust CI/release uses 1.86.0 to match the Docker 1.86 toolchain.

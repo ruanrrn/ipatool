@@ -69,6 +69,8 @@ struct LoginRateLimiter {
     /// (attempt_count, last_attempt_time)
     ip_attempts: HashMap<String, (u32, Instant)>,
     user_attempts: HashMap<String, (u32, Instant)>,
+    in_flight: HashMap<String, u32>,
+    user_in_flight: HashMap<String, u32>,
 }
 
 impl LoginRateLimiter {
@@ -76,6 +78,8 @@ impl LoginRateLimiter {
         Self {
             ip_attempts: HashMap::new(),
             user_attempts: HashMap::new(),
+            in_flight: HashMap::new(),
+            user_in_flight: HashMap::new(),
         }
     }
 
@@ -123,6 +127,21 @@ impl LoginRateLimiter {
         Ok(())
     }
 
+    fn admit(&mut self, ip: &str, username: &str) -> Result<(), String> {
+        self.check(ip, username)?;
+        if self.in_flight.get(ip).copied().unwrap_or(0) >= LOGIN_MAX_FAILURES_PER_IP
+            || self.user_in_flight.get(username).copied().unwrap_or(0)
+                >= LOGIN_MAX_FAILURES_PER_USER
+            || self.in_flight.values().sum::<u32>() >= 32
+        {
+            return Err("登录请求正在处理中，请稍后再试".to_string());
+        }
+        *self.in_flight.entry(ip.to_string()).or_default() += 1;
+        *self.user_in_flight.entry(username.to_string()).or_default() += 1;
+        self.record_failure(ip, username);
+        Ok(())
+    }
+
     fn record_failure(&mut self, ip: &str, username: &str) {
         let now = Instant::now();
         let entry = self.ip_attempts.entry(ip.to_string()).or_insert((0, now));
@@ -140,6 +159,29 @@ impl LoginRateLimiter {
     fn clear_success(&mut self, ip: &str, username: &str) {
         self.ip_attempts.remove(ip);
         self.user_attempts.remove(username);
+    }
+}
+
+struct LoginAdmission {
+    limiter: Arc<Mutex<LoginRateLimiter>>,
+    ip: String,
+    username: String,
+}
+impl Drop for LoginAdmission {
+    fn drop(&mut self) {
+        let mut limiter = self.limiter.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = limiter.user_in_flight.get_mut(&self.username) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                limiter.user_in_flight.remove(&self.username);
+            }
+        }
+        if let Some(count) = limiter.in_flight.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                limiter.in_flight.remove(&self.ip);
+            }
+        }
     }
 }
 
@@ -597,7 +639,7 @@ fn matching_login_password(password: &str, hash: &str) -> Option<String> {
 }
 
 fn request_uses_https(req: &HttpRequest) -> bool {
-    should_use_secure_cookie(req.connection_info().scheme().eq_ignore_ascii_case("https"))
+    should_use_secure_cookie(build_base_url(req).starts_with("https://"))
 }
 
 const MIN_ADMIN_PASSWORD_CHARS: usize = 8;
@@ -1221,8 +1263,31 @@ fn build_base_url(req: &HttpRequest) -> String {
         }
     }
 
-    let info = req.connection_info();
-    format!("{}://{}", info.scheme(), info.host())
+    request_base_url(req, TrustedProxies::from_env())
+}
+
+fn request_base_url(req: &HttpRequest, trusted: &TrustedProxies) -> String {
+    if req
+        .peer_addr()
+        .is_some_and(|peer| trusted.trusts(peer.ip()))
+    {
+        let info = req.connection_info();
+        return format!("{}://{}", info.scheme(), info.host());
+    }
+    // connection_info incorporates forwarding headers. For an untrusted peer use only the
+    // actual transport URI and Host header.
+    let scheme = if req.app_config().secure() {
+        "https"
+    } else {
+        "http"
+    };
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()))
+        .unwrap_or("localhost");
+    format!("{}://{}", scheme, host)
 }
 
 fn resolve_project_root() -> PathBuf {
@@ -1532,6 +1597,15 @@ fn is_signed_record_link(link: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(link) else {
         return false;
     };
+    if !url
+        .path()
+        .ends_with(&format!("/api/public/download-records/{}/file", record_id))
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
     let mut expires = None;
     let mut sig = None;
     for (key, value) in url.query_pairs() {
@@ -1542,6 +1616,23 @@ fn is_signed_record_link(link: &str) -> bool {
         }
     }
     verify_public_link(&record_link_resource(record_id), expires, sig.as_deref())
+}
+
+fn is_signed_record_link_for_base(link: &str, base: &str) -> bool {
+    let (Ok(url), Ok(base)) = (reqwest::Url::parse(link), reqwest::Url::parse(base)) else {
+        return false;
+    };
+    let Some(record_id) = extract_record_id_from_download_url(link) else {
+        return false;
+    };
+    url.origin() == base.origin()
+        && url.path()
+            == format!(
+                "{}/api/public/download-records/{}/file",
+                base.path().trim_end_matches('/'),
+                record_id
+            )
+        && is_signed_record_link(link)
 }
 
 /// Public download URL for a record. iOS installers fetch it without cookies, so it carries an
@@ -1881,7 +1972,7 @@ fn normalize_download_record_artifact_paths(db: &Database, downloads_dir: &Path)
         };
         let target_path = parent_dir.join(&expected_name);
         let final_path = if target_path.exists() {
-            target_path
+            continue;
         } else {
             if let Err(error) = std::fs::rename(&canonical_current, &target_path) {
                 log::warn!(
@@ -1996,6 +2087,14 @@ fn snapshot_progress_event(snapshot: &JobState) -> JobProgressEvent {
         }),
         error: snapshot.error.clone(),
     }
+}
+
+fn unique_download_task_name(slug: &str) -> String {
+    let mut end = slug.len().min(210);
+    while !slug.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}-{}", &slug[..end], Uuid::new_v4())
 }
 
 fn build_download_task_slug(
@@ -2153,6 +2252,207 @@ mod tests {
     }
 
     #[test]
+    fn login_admission_is_bounded_and_released_on_drop() {
+        let limiter = Arc::new(Mutex::new(LoginRateLimiter::new()));
+        let mut guards = Vec::new();
+        for _ in 0..LOGIN_MAX_FAILURES_PER_IP {
+            limiter.lock().unwrap().admit("ip", "admin").unwrap();
+            guards.push(LoginAdmission {
+                limiter: Arc::clone(&limiter),
+                ip: "ip".into(),
+                username: "admin".into(),
+            });
+        }
+        // A successful request cannot clear outstanding work from other requests.
+        limiter.lock().unwrap().clear_success("ip", "admin");
+        assert!(limiter.lock().unwrap().admit("ip", "admin").is_err());
+        drop(guards);
+        assert!(limiter.lock().unwrap().in_flight.is_empty());
+        assert!(limiter.lock().unwrap().user_in_flight.is_empty());
+        assert!(limiter.lock().unwrap().admit("ip", "admin").is_ok());
+    }
+
+    #[test]
+    fn signed_record_links_require_local_origin_and_exact_resource() {
+        let base = "https://ipa.example.com/prefix";
+        let url = build_record_download_url(base, 42);
+        assert!(is_signed_record_link_for_base(&url, base));
+        for forged in [
+            url.replace("ipa.example.com", "evil.example"),
+            url.replace("https://", "http://"),
+            url.replace("/file?", "/other?"),
+            url.replace("/prefix/", "/other/"),
+        ] {
+            assert!(!is_signed_record_link_for_base(&forged, base), "{forged}");
+        }
+    }
+
+    #[test]
+    fn untrusted_peers_cannot_set_url_scheme_or_host() {
+        let req = request_from(
+            "203.0.113.2:5000",
+            &[
+                ("host", "ipa.example"),
+                ("forwarded", "host=evil.example;proto=https"),
+                ("x-forwarded-host", "evil.example"),
+                ("x-forwarded-proto", "https"),
+            ],
+        );
+        assert_eq!(
+            request_base_url(&req, &TrustedProxies::parse(Some("none"))),
+            "http://ipa.example"
+        );
+    }
+
+    #[test]
+    fn concurrent_archive_adds_do_not_lose_versions() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let id = id[id.len().saturating_sub(19)..].to_string();
+        let barrier = Arc::new(std::sync::Barrier::new(12));
+        let handles: Vec<_> = (0..12)
+            .map(|index| {
+                let id = id.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    actix_web::rt::System::new().block_on(async move {
+                        add_archive_app(web::Json(AddArchiveRequest {
+                            app_id: id,
+                            app_name: "Concurrent archive".into(),
+                            icon_url: None,
+                            bundle_id: None,
+                            artist_name: None,
+                            versions: vec![ArchiveVersion {
+                                version_id: index.to_string(),
+                                version: index.to_string(),
+                                description: Some(format!("note-{index}")),
+                                released_at: None,
+                                size_bytes: None,
+                            }],
+                        }))
+                        .await;
+                    });
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let path = archive_file_path(&id);
+        let app = load_archive_app_from_path(&path).unwrap().unwrap();
+        assert_eq!(app.versions.len(), 12);
+        assert!(app
+            .versions
+            .iter()
+            .all(|v| v.description.as_deref() == Some(format!("note-{}", v.version_id).as_str())));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn long_unicode_task_names_leave_room_for_execution_id() {
+        let slug = build_download_task_slug(Some(&"应用".repeat(100)), "123", Some("1"), None);
+        let name = unique_download_task_name(&slug);
+        assert!(name.len() <= 255);
+        assert_ne!(name, unique_download_task_name(&slug));
+    }
+
+    #[actix_web::test]
+    async fn parallel_http_login_attempts_are_limited_before_password_verification() {
+        let (state, _, _) = purchase_test_state("concurrent-login").await;
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .route("/login", web::post().to(admin_login)),
+        )
+        .await;
+        let responses = futures::future::join_all((0..12).map(|_| {
+            let req = actix_web::test::TestRequest::post()
+                .uri("/login")
+                .peer_addr("8.8.8.8:5000".parse().unwrap())
+                .set_json(serde_json::json!({"username":"admin", "password":"wrong-password"}))
+                .to_request();
+            actix_web::test::call_service(&app, req)
+        }))
+        .await;
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|r| r.status() == actix_web::http::StatusCode::UNAUTHORIZED)
+                .count(),
+            5
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|r| r.status() == actix_web::http::StatusCode::TOO_MANY_REQUESTS)
+                .count(),
+            7
+        );
+        assert!(state
+            .login_rate_limiter
+            .lock()
+            .unwrap()
+            .in_flight
+            .is_empty());
+        let req = actix_web::test::TestRequest::post()
+            .uri("/login")
+            .peer_addr("8.8.8.8:5000".parse().unwrap())
+            .set_json(serde_json::json!({"username":"admin", "password":"wrong-password"}))
+            .to_request();
+        assert_eq!(
+            actix_web::test::call_service(&app, req).await.status(),
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[actix_web::test]
+    async fn cleanup_reports_nested_ipa_bytes_without_following_symlinks() {
+        let (state, token, _) = purchase_test_state("nested-cleanup").await;
+        assert_ne!(state.downloads_dir, std::env::temp_dir());
+        assert_eq!(
+            state.downloads_dir.parent(),
+            Some(std::env::temp_dir().as_path())
+        );
+        assert!(state
+            .downloads_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("ipatool-nested-cleanup-"));
+        let task = state.downloads_dir.join("jobs/task/artifacts/account/run");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join("app.ipa"), b"12345").unwrap();
+        std::fs::write(task.join("temporary.partial"), b"123456789").unwrap();
+        #[cfg(unix)]
+        {
+            let outside = state.downloads_dir.join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("other.ipa"), b"123456789").unwrap();
+            std::os::unix::fs::symlink(&outside, task.join("outside-link")).unwrap();
+        }
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .route("/cleanup", web::post().to(cleanup_downloads)),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/cleanup")
+            .to_request();
+        let response: Value = actix_web::test::call_and_read_body_json(&app, req).await;
+        assert_eq!(response["data"]["freed_bytes"], 5);
+        assert!(!state.downloads_dir.join("jobs/task").exists());
+        #[cfg(unix)]
+        assert!(state.downloads_dir.join("outside/other.ipa").exists());
+        std::fs::remove_dir_all(&state.downloads_dir).unwrap();
+        ACCOUNTS.write().await.remove(&token);
+    }
+
+    #[test]
     fn app_id_and_region_validation() {
         assert!(is_valid_app_id("414478124"));
         assert!(!is_valid_app_id(""));
@@ -2200,13 +2500,8 @@ mod tests {
                 updated_at: None,
             })
             .unwrap();
-        let downloads_dir = PathBuf::from(
-            std::env::var("TMPDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .to_string_lossy()
-                .into_owned(),
-        );
+        let downloads_dir =
+            std::env::temp_dir().join(format!("ipatool-{label}-{}", Uuid::new_v4()));
         let state = web::Data::new(AppState {
             download_manager: Arc::new(DownloadManager::new(db.clone(), downloads_dir.clone())),
             db,
@@ -2618,7 +2913,7 @@ async fn start_download_direct(
         app_ver_id.as_deref(),
     );
     let job_root = data.downloads_dir.join("jobs");
-    let task_dir = job_root.join(&task_slug);
+    let task_dir = job_root.join(unique_download_task_name(&task_slug));
 
     // Look up a reusable record, then release the DB lock before any IPA inspection.
     let reusable_record = data
@@ -4570,7 +4865,7 @@ async fn admin_login(
             .login_rate_limiter
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Err(reason) = limiter.check(&client_ip, &username) {
+        if let Err(reason) = limiter.admit(&client_ip, &username) {
             log::warn!(
                 "[auth:login] rate-limited ip={} user={}: {}",
                 client_ip,
@@ -4580,6 +4875,12 @@ async fn admin_login(
             return HttpResponse::TooManyRequests().json(ApiResponse::<String>::error(reason));
         }
     }
+
+    let _admission = LoginAdmission {
+        limiter: Arc::clone(&data.login_rate_limiter),
+        ip: client_ip.clone(),
+        username: username.clone(),
+    };
 
     let user = {
         let db = match data.db.lock() {
@@ -4605,17 +4906,20 @@ async fn admin_login(
     // bcrypt takes ~100ms+ of CPU: run it on the blocking pool without holding the DB lock,
     // so concurrent logins cannot stall every other request.
     let stored_hash = user.as_ref().map(|user| user.password_hash.clone());
-    let (verified, upgraded_hash) = web::block(move || match stored_hash {
-        Some(hash) => match matching_login_password(&password, &hash) {
-            Some(matched) => (
-                true,
-                is_legacy_password_hash(&hash).then(|| hash_password(&matched)),
-            ),
-            None => (false, None),
-        },
-        None => {
-            let _ = verify_password(&password, &DUMMY_PASSWORD_HASH);
-            (false, None)
+    let (verified, upgraded_hash) = web::block(move || {
+        let _admission = _admission;
+        match stored_hash {
+            Some(hash) => match matching_login_password(&password, &hash) {
+                Some(matched) => (
+                    true,
+                    is_legacy_password_hash(&hash).then(|| hash_password(&matched)),
+                ),
+                None => (false, None),
+            },
+            None => {
+                let _ = verify_password(&password, &DUMMY_PASSWORD_HASH);
+                (false, None)
+            }
         }
     })
     .await
@@ -4629,10 +4933,7 @@ async fn admin_login(
             } else {
                 log::warn!("[auth:login] wrong password for user={}", username);
             }
-            data.login_rate_limiter
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .record_failure(&client_ip, &username);
+
             return HttpResponse::Unauthorized()
                 .json(ApiResponse::<String>::error("用户名或密码错误".to_string()));
         }
@@ -5033,7 +5334,9 @@ async fn plist_from_token(
 
     // Tokens are unauthenticated input: only serve manifests for download links this server
     // signed, otherwise anyone could mint OTA install prompts for arbitrary IPAs on this domain.
-    if !is_signed_record_link(&link_str) && !request_has_admin_session(&req, &data) {
+    if !is_signed_record_link_for_base(&link_str, &build_base_url(&req))
+        && !request_has_admin_session(&req, &data)
+    {
         return HttpResponse::Forbidden()
             .content_type("text/plain; charset=utf-8")
             .insert_header(("Cache-Control", "no-store"))
@@ -5051,21 +5354,19 @@ async fn plist_from_token(
             .ok()
             .flatten();
 
-        if let Some(record) = record {
-            if let Some(file_path) = record.file_path.clone() {
-                let path = PathBuf::from(file_path);
-                if path.exists() {
-                    if let Some(inspection) = inspect_existing_ipa(&path) {
-                        if inspection_blocks_install(&inspection) {
-                            let message = format!("已拦截安装：{}", inspection.summary);
-                            return HttpResponse::Forbidden()
-                                .content_type("text/plain; charset=utf-8")
-                                .insert_header(("Cache-Control", "no-store"))
-                                .body(message);
-                        }
-                    }
-                }
-            }
+        let inspection = record
+            .and_then(|r| r.file_path)
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .and_then(|path| inspect_existing_ipa(&path));
+        if inspection.as_ref().is_none_or(inspection_blocks_install) {
+            let message = inspection
+                .map(|i| format!("已拦截安装：{}", i.summary))
+                .unwrap_or_else(|| "已拦截安装：无法验证 IPA".to_string());
+            return HttpResponse::Forbidden()
+                .content_type("text/plain; charset=utf-8")
+                .insert_header(("Cache-Control", "no-store"))
+                .body(message);
         }
     }
 
@@ -5834,6 +6135,27 @@ async fn cleanup_download_record_file(
     })))
 }
 
+fn ipa_bytes_without_symlinks(root: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let Ok(kind) = entry.file_type() else {
+                return 0;
+            };
+            if kind.is_dir() {
+                ipa_bytes_without_symlinks(&entry.path())
+            } else if kind.is_file() && entry.path().extension().is_some_and(|ext| ext == "ipa") {
+                entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
 // 清理服务器上的下载文件
 async fn cleanup_downloads(data: web::Data<AppState>) -> impl Responder {
     let jobs_dir = data.downloads_dir.join("jobs");
@@ -5843,20 +6165,13 @@ async fn cleanup_downloads(data: web::Data<AppState>) -> impl Responder {
     if let Ok(mut entries) = tokio::fs::read_dir(&jobs_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.is_dir() {
-                if let Ok(mut dir_entries) = tokio::fs::read_dir(&path).await {
-                    while let Ok(Some(f)) = dir_entries.next_entry().await {
-                        if f.path().extension().map(|e| e == "ipa").unwrap_or(false) {
-                            if let Ok(meta) = f.metadata().await {
-                                freed_bytes += meta.len();
-                            }
-                        }
-                    }
-                }
+            if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                let artifact_bytes = ipa_bytes_without_symlinks(&path);
                 if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                     eprintln!("[cleanup] Failed to remove {:?}: {}", path, e);
                 } else {
                     cleaned += 1;
+                    freed_bytes += artifact_bytes;
                 }
             }
         }
@@ -6182,6 +6497,8 @@ struct ContributingIdsResponse {
     in_review: Vec<String>,
 }
 
+static ARCHIVE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 fn archive_file_path(app_id: &str) -> PathBuf {
     resolve_archive_dir().join(format!("{}.json", app_id))
 }
@@ -6208,7 +6525,21 @@ fn save_archive_app(file_path: &Path, app: &ArchiveApp) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| format!("创建收藏目录失败: {}", error))?;
     }
 
-    std::fs::write(file_path, json).map_err(|error| format!("保存收藏失败: {}", error))
+    let temporary = file_path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, file_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| format!("保存收藏失败: {}", error))
 }
 
 fn community_archive_base_url() -> String {
@@ -7290,6 +7621,7 @@ async fn add_archive_app(body: web::Json<AddArchiveRequest>) -> impl Responder {
         )));
     }
 
+    let _archive_guard = ARCHIVE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file_path = archive_file_path(&body.app_id);
     let mut app = match load_archive_app_from_path(&file_path) {
         Ok(Some(existing)) => ArchiveApp {
@@ -7363,6 +7695,7 @@ async fn remove_archive_app_version(path: web::Path<(String, String)>) -> impl R
     if !is_valid_app_id(&id) {
         return invalid_app_id_response();
     }
+    let _archive_guard = ARCHIVE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file_path = archive_file_path(&id);
 
     let Some(mut app) = (match load_archive_app_from_path(&file_path) {
@@ -7397,6 +7730,7 @@ async fn remove_archive_app(path: web::Path<String>) -> impl Responder {
     if !is_valid_app_id(&id) {
         return invalid_app_id_response();
     }
+    let _archive_guard = ARCHIVE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file_path = archive_file_path(&id);
 
     if file_path.exists() {
@@ -7803,6 +8137,8 @@ async fn main() -> std::io::Result<()> {
         log::error!("Failed to initialize database: {}", e);
         panic!("Database initialization failed: {}", e);
     });
+    db.mark_interrupted_batches()
+        .expect("Failed to recover interrupted batches");
     init_public_link_key(&db);
 
     // 将数据库包装在 Arc<Mutex<Database>> 中

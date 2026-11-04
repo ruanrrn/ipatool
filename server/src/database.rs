@@ -153,6 +153,19 @@ impl Database {
         })
     }
 
+    pub fn mark_interrupted_batches(&self) -> Result<()> {
+        let connection = self.connection.lock().unwrap();
+        // Never replay purchases after a process interruption. Make orphaned work terminal.
+        connection.execute_batch("BEGIN;
+            UPDATE batch_download_items SET status = 'failed', error = '服务重启，任务已中断，请手动重试'
+                WHERE status IN ('pending', 'processing', 'downloading', 'retrying');
+            UPDATE batch_download_tasks SET status = 'failed', updated_at = CURRENT_TIMESTAMP,
+                failed_count = (SELECT COUNT(*) FROM batch_download_items i WHERE i.batch_id = batch_download_tasks.id AND i.status = 'failed')
+                WHERE status IN ('pending', 'processing');
+            COMMIT;")?;
+        Ok(())
+    }
+
     fn create_tables(conn: &Connection) -> Result<()> {
         conn.execute(
             "
@@ -2036,6 +2049,43 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{}_{}.sqlite", prefix, nonce))
+    }
+
+    #[test]
+    fn reopening_marks_orphaned_batches_failed_without_replaying() {
+        let path = temp_db_path("interrupted-batch");
+        let batch_id;
+        {
+            let db = Database::new(path.to_str().unwrap()).unwrap();
+            batch_id = db.create_batch_task("interrupted", 2).unwrap();
+            db.add_batch_item(batch_id, "123", None, None, "a@example.com")
+                .unwrap();
+            db.add_batch_item(batch_id, "456", None, None, "a@example.com")
+                .unwrap();
+            let item_id = db.get_batch_items(batch_id).unwrap()[0].id.unwrap();
+            db.update_batch_item(item_id, "retrying", 0, None, 1)
+                .unwrap();
+            db.update_batch_task_progress(batch_id, 0, 0, "processing")
+                .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(db.get_batch_tasks().unwrap()[0].status, "processing");
+        db.mark_interrupted_batches().unwrap();
+        let task = db
+            .get_batch_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == Some(batch_id))
+            .unwrap();
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.failed_count, 2);
+        assert!(db
+            .get_batch_items(batch_id)
+            .unwrap()
+            .iter()
+            .all(|i| i.status == "failed" && i.error.is_some()));
+        drop(db);
+        fs::remove_file(path).unwrap();
     }
 
     fn sample_record(

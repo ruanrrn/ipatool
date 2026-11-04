@@ -7,6 +7,12 @@ pub struct SapRandom {
     pub cursor: usize,
 }
 
+impl Default for SapRandom {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SapRandom {
     pub fn new() -> Self {
         SapRandom {

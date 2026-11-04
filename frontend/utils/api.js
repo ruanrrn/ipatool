@@ -36,16 +36,19 @@ export const apiFetch = async (url, options = {}, { timeout = DEFAULT_TIMEOUT, r
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout)
+    const callerSignal = options.signal
+    const abortFromCaller = () => controller.abort(callerSignal.reason)
+    if (callerSignal?.aborted) abortFromCaller()
+    else callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
     fetchOptions.signal = controller.signal
 
     try {
       const response = await fetch(url, fetchOptions)
-      clearTimeout(timer)
-
       let data
       try {
         data = await response.json()
-      } catch {
+      } catch (error) {
+        if (controller.signal.aborted || error.name === 'AbortError') throw error
         data = { ok: false, error: 'Invalid response format' }
       }
 
@@ -54,7 +57,8 @@ export const apiFetch = async (url, options = {}, { timeout = DEFAULT_TIMEOUT, r
       clearTimeout(timer)
 
       // Don't retry on abort (timeout) or if we've exhausted retries
-      if (err.name === 'AbortError') {
+      if (callerSignal?.aborted) throw callerSignal.reason || err
+      if (controller.signal.aborted || err.name === 'AbortError') {
         throw new Error(`Request timed out after ${timeout}ms`, { cause: err })
       }
 
@@ -63,8 +67,24 @@ export const apiFetch = async (url, options = {}, { timeout = DEFAULT_TIMEOUT, r
       // Only retry on network errors, not HTTP errors
       if (attempt < retries) {
         const delay = RETRY_BACKOFF_BASE * Math.pow(2, attempt)
-        await new Promise(resolve => setTimeout(resolve, delay))
+        await new Promise((resolve, reject) => {
+          const retryTimer = setTimeout(finish, delay)
+          function finish() {
+            callerSignal?.removeEventListener('abort', cancel)
+            resolve()
+          }
+          function cancel() {
+            clearTimeout(retryTimer)
+            callerSignal?.removeEventListener('abort', cancel)
+            reject(callerSignal.reason || new DOMException('Aborted', 'AbortError'))
+          }
+          if (callerSignal?.aborted) cancel()
+          else callerSignal?.addEventListener('abort', cancel, { once: true })
+        })
       }
+    } finally {
+      clearTimeout(timer)
+      callerSignal?.removeEventListener('abort', abortFromCaller)
     }
   }
 

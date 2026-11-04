@@ -85,7 +85,7 @@ pub struct DownloadParams<'a, S: AppleAuthService> {
     pub progress_callback: Option<std::sync::Arc<dyn Fn(DownloadProgress) + Send + Sync>>,
 }
 
-impl<'a, S: AppleAuthService> DownloadParams<'a, S> {
+impl<S: AppleAuthService> DownloadParams<'_, S> {
     pub fn on_progress(&self, progress: DownloadProgress) {
         if let Some(callback) = &self.progress_callback {
             callback(progress);
@@ -321,19 +321,21 @@ pub fn sanitize_ipa_filename(name: &str) -> String {
     }
 
     let max_base_len = MAX_FILENAME_BYTES - extension.len();
-    let truncated = if base_len > max_base_len {
+    if base_len > max_base_len {
         let suffix = bundle_id_suffix.unwrap_or(extension);
-        let prefix_budget = max_base_len - suffix.len();
+        let prefix_budget = max_base_len.saturating_sub(suffix.len());
         if prefix_budget > 0 {
-            format!("{}...{}", &cleaned[..prefix_budget.min(50)], suffix)
+            let mut end = prefix_budget.min(50);
+            while !cleaned.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...{}", &cleaned[..end], suffix)
         } else {
             format!("download_{}.ipa", hex::encode(&cleaned.as_bytes()[..8]))
         }
     } else {
         cleaned
-    };
-
-    truncated
+    }
 }
 
 pub fn canonical_ipa_filename(
@@ -592,12 +594,23 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
             Some(bundle_id)
         },
     );
-    let output_file_path = download_dir.join(output_file_name);
+    // A completed artifact belongs to one account, requested version, and execution. Even
+    // identical concurrent requests must never replace each other's authorization payload.
+    use sha2::Digest;
+    let account = hex::encode(sha2::Sha256::digest(
+        params.email.trim().to_lowercase().as_bytes(),
+    ));
+    let artifact_dir = download_dir
+        .join("artifacts")
+        .join(account)
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&artifact_dir).await?;
+    let output_file_path = artifact_dir.join(output_file_name);
     // Chunks are merged and patched in a sibling ".partial" file that is only renamed to the
     // final .ipa name once packaging succeeded, so a failed run never leaves a broken IPA that
     // the artifact scanner would later list as a completed download.
-    let partial_file_path = output_file_path.with_extension("ipa.partial");
     let cache_dir = create_download_cache_dir(download_dir).await?;
+    let partial_file_path = cache_dir.join("payload.ipa.partial");
 
     let outcome = fetch_and_package(
         &params,
@@ -614,6 +627,7 @@ pub async fn download_ipa_with_account<S: AppleAuthService>(
         Ok(downloaded) => downloaded,
         Err(error) => {
             let _ = fs::remove_file(&partial_file_path).await;
+            let _ = fs::remove_dir(&artifact_dir).await;
             return Err(error);
         }
     };
@@ -1227,5 +1241,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn concurrent_downloads_preserve_each_accounts_authorization() {
+        use base64::Engine;
+        let url = serve_file(Arc::new(sample_ipa(b"binary")), |_, _| None).await;
+        let dir = temp_download_dir("account-isolation");
+        let download_path = dir.to_string_lossy().into_owned();
+        let download = |email: &'static str, signature: &'static str| {
+            let mut song = song_for(&url);
+            song["sinfs"][0]["sinf"] =
+                Value::String(base64::engine::general_purpose::STANDARD.encode(signature));
+            let download_path = download_path.clone();
+            async move {
+                let store = SongListStore { song };
+                download_ipa_with_account(DownloadParams {
+                    store: &store,
+                    email,
+                    appid: "123",
+                    app_ver_id: Some("1234"),
+                    download_path: &download_path,
+                    auto_purchase: false,
+                    token: None,
+                    progress_callback: None,
+                })
+                .await
+                .unwrap()
+                .file
+                .unwrap()
+            }
+        };
+        let (a, b, concurrent_a) = tokio::join!(
+            download("a@example.com", "A"),
+            download("b@example.com", "B"),
+            download("a@example.com", "A2")
+        );
+        assert_ne!(a, b);
+        assert_ne!(a, concurrent_a);
+        for (path, expected) in [(a, "A"), (b, "B"), (concurrent_a, "A2")] {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+            let mut signature = String::new();
+            zip.by_name("Payload/Test.app/SC_Info/Test.sinf")
+                .unwrap()
+                .read_to_string(&mut signature)
+                .unwrap();
+            assert_eq!(signature, expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

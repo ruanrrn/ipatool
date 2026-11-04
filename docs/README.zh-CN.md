@@ -120,22 +120,24 @@ docker exec -i ipatool ./server reset-admin-password --username admin --password
 
 ### 方式三：源码运行
 
-**前提要求：** Node.js 18+ · pnpm · Rust 1.85+
+**前提要求：** Node.js 22.13+ / 24+ · pnpm 9.15.9 · Rust 1.86+
+
+Node.js 用于前端开发和构建，发布的服务端不需要 Node.js。参见[依赖审计说明](dependency-audit.md)。
 
 **开发模式：**
 
 ```bash
 pnpm install
-pnpm run dev                        # 前端 → localhost:5173
-cd server && cargo run --bin server # 后端 → localhost:8080
+pnpm run dev                        # 前端 → localhost:3000
+pnpm run dev:rust                   # 后端 → localhost:8080
 ```
 
 **生产构建：**
 
 ```bash
 pnpm run build
-rm -rf server/dist && cp -a dist/. server/dist/
-cd server && cargo run --bin server
+pnpm run build:rust
+./server/target/release/server
 ```
 
 **查看 / 重置管理员密码：**

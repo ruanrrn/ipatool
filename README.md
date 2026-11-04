@@ -120,22 +120,24 @@ docker exec -i ipatool ./server reset-admin-password --username admin --password
 
 ### Method 3: Run from Source
 
-**Prerequisites:** Node.js 18+ · pnpm · Rust 1.85+
+**Prerequisites:** Node.js 22.13+ / 24+ · pnpm 9.15.9 · Rust 1.86+
+
+Node.js is required for frontend development and building; the released server does not require Node.js. See [dependency audit notes](docs/dependency-audit.md).
 
 **Development:**
 
 ```bash
 pnpm install
-pnpm run dev                        # Frontend → localhost:5173
-cd server && cargo run --bin server # Backend → localhost:8080
+pnpm run dev                        # Frontend → localhost:3000
+pnpm run dev:rust                   # Backend → localhost:8080
 ```
 
 **Production build:**
 
 ```bash
 pnpm run build
-rm -rf server/dist && cp -a dist/. server/dist/
-cd server && cargo run --bin server
+pnpm run build:rust
+./server/target/release/server
 ```
 
 **View / Reset Admin Password:**
